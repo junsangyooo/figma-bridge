@@ -5,6 +5,7 @@ Each subcommand is independent: it does one thing and prints JSON to stdout.
 Token is read from FIGMA_PERSONAL_TOKEN (env or ~/.claude/secrets/.env).
 """
 import argparse
+import base64
 import http.server
 import json
 import os
@@ -535,15 +536,18 @@ def run_js(code, target=None, timeout=60):
             print(f"경고: 파일 대조를 못 했습니다 (열린 파일: {open_name}). "
                   f"이름이 맞는지 직접 확인하세요.", file=sys.stderr)
 
-    out = relay_call("/job", {"code": code, "timeout": timeout}, timeout=timeout + 10)
-    emit({"_source": "plugin", **out})
+    return relay_call("/job", {"code": code, "timeout": timeout}, timeout=timeout + 10)
+
+
+def run_js_emit(code, target=None, timeout=60):
+    emit({"_source": "plugin", **run_js(code, target, timeout)})
 
 
 def cmd_exec(args, token=None):
     code = open(args.file, encoding="utf-8").read() if args.file else args.code
     if not code:
         sys.exit("exec needs --code or --file")
-    run_js(code, args.target, args.timeout)
+    run_js_emit(code, args.target, args.timeout)
 
 
 JS_TOKENS = """
@@ -589,15 +593,199 @@ return figma.root.children.map(p => {
 
 
 def cmd_tokens(args, token=None):
-    run_js(JS_TOKENS, args.target, 60)
+    run_js_emit(JS_TOKENS, args.target, 60)
 
 
 def cmd_selection(args, token=None):
-    run_js(JS_SELECTION, args.target, 30)
+    run_js_emit(JS_SELECTION, args.target, 30)
 
 
 def cmd_pages(args, token=None):
-    run_js(JS_PAGES, args.target, 30)
+    run_js_emit(JS_PAGES, args.target, 30)
+
+
+# --- wrappers ---------------------------------------------------------------
+# Thin shells over exec: the JS is the same code you would write by hand, with
+# arguments injected as a JSON literal so quoting can never break out.
+
+JS_FIND = """
+const P = %s;
+const page = figma.currentPage;
+const nodes = P.types.length
+  ? page.findAllWithCriteria({ types: P.types })   // indexed lookup, far faster
+  : page.findAll(function () { return true; });
+const needle = (P.name || "").toLowerCase();
+const hits = needle
+  ? nodes.filter(function (n) { return n.name.toLowerCase().indexOf(needle) !== -1; })
+  : nodes;
+return {
+  total: hits.length,
+  nodes: hits.slice(0, P.limit).map(function (n) {
+    const out = { id: n.id, name: n.name, type: n.type };
+    if ("x" in n) out.box = { x: Math.round(n.x), y: Math.round(n.y),
+                              width: Math.round(n.width), height: Math.round(n.height) };
+    return out;
+  })
+};
+"""
+
+JS_INSPECT = """
+const node = await figma.getNodeByIdAsync(%s);
+if (!node) return { error: "node not found on this page" };
+
+function hex(c) {
+  const v = function (x) { return ("0" + Math.round(x * 255).toString(16)).slice(-2).toUpperCase(); };
+  return "#" + v(c.r) + v(c.g) + v(c.b);
+}
+function paints(list) {
+  if (!list || list === figma.mixed) return undefined;
+  return list.filter(function (p) { return p.visible !== false; })
+             .map(function (p) { return p.type === "SOLID" ? { type: "SOLID", hex: hex(p.color) } : { type: p.type }; });
+}
+
+const out = { id: node.id, name: node.name, type: node.type };
+if ("x" in node) out.box = { x: Math.round(node.x), y: Math.round(node.y),
+                             width: Math.round(node.width), height: Math.round(node.height) };
+if (node.layoutMode && node.layoutMode !== "NONE") {
+  out.layout = { mode: node.layoutMode, gap: node.itemSpacing,
+                 padding: [node.paddingTop, node.paddingRight, node.paddingBottom, node.paddingLeft] };
+}
+const fills = paints(node.fills), strokes = paints(node.strokes);
+if (fills && fills.length) out.fills = fills;
+if (strokes && strokes.length) out.strokes = strokes;
+if ("cornerRadius" in node && node.cornerRadius !== figma.mixed) out.cornerRadius = node.cornerRadius;
+if ("characters" in node) {
+  out.text = node.characters;
+  if (node.fontSize !== figma.mixed) out.fontSize = node.fontSize;
+  if (node.fontName !== figma.mixed) out.font = node.fontName;
+}
+if (node.boundVariables && Object.keys(node.boundVariables).length) {
+  out.boundVariables = Object.keys(node.boundVariables);
+}
+if (node.type === "INSTANCE") {
+  const main = await node.getMainComponentAsync();
+  if (main) out.mainComponent = main.name;
+  out.componentProperties = Object.keys(node.componentProperties || {});
+}
+if ("children" in node) out.childCount = node.children.length;
+if (node.visible === false) out.visible = false;
+return out;
+"""
+
+JS_COMPONENTS = """
+const found = figma.currentPage.findAllWithCriteria({ types: ["COMPONENT", "COMPONENT_SET"] });
+return found.map(function (n) {
+  const out = { id: n.id, name: n.name, type: n.type };
+  if (n.type === "COMPONENT_SET") {
+    out.variants = n.children.map(function (c) { return c.name; });
+    out.properties = Object.keys(n.componentPropertyDefinitions || {});
+  } else if (n.parent && n.parent.type === "COMPONENT_SET") {
+    // Reading definitions off a variant throws; the set owns them.
+    out.variantOf = n.parent.name;
+  } else {
+    out.properties = Object.keys(n.componentPropertyDefinitions || {});
+  }
+  if (n.description) out.description = n.description;
+  return out;
+});
+"""
+
+JS_EXPORT = """
+const P = %s;
+const node = await figma.getNodeByIdAsync(P.node);
+if (!node) return { error: "node not found on this page" };
+const settings = P.format === "SVG"
+  ? { format: "SVG_STRING" }
+  : { format: P.format, constraint: { type: "SCALE", value: P.scale } };
+const data = await node.exportAsync(settings);
+if (typeof data === "string") return { format: "SVG", text: data, name: node.name };
+if (typeof figma.base64Encode !== "function") {
+  return { error: "figma.base64Encode 없음 — REST render를 쓰세요" };
+}
+return { format: P.format, base64: figma.base64Encode(data), name: node.name };
+"""
+
+JS_TEXT = """
+return figma.currentPage.findAllWithCriteria({ types: ["TEXT"] }).map(function (n) {
+  return { id: n.id, name: n.name, text: n.characters };
+});
+"""
+
+JS_TEXT_REPLACE = """
+const P = %s;
+const nodes = figma.currentPage.findAllWithCriteria({ types: ["TEXT"] });
+const changed = [];
+for (const n of nodes) {
+  if (n.characters.indexOf(P.from) === -1) continue;
+  // Every font in the node must be loaded before its characters can change.
+  for (const seg of n.getStyledTextSegments(["fontName"])) {
+    await figma.loadFontAsync(seg.fontName);
+  }
+  n.characters = n.characters.split(P.from).join(P.to);
+  changed.push({ id: n.id, text: n.characters });
+}
+return { changed: changed.length, nodes: changed };
+"""
+
+
+def node_from(args):
+    node = getattr(args, "node", None)
+    if not node and args.target:
+        node = parse_target(args.target)[1]
+    return node
+
+
+def cmd_find(args, token=None):
+    types = [t.strip().upper() for t in (args.type or "").split(",") if t.strip()]
+    params = {"name": args.name, "types": types, "limit": args.limit}
+    run_js_emit(JS_FIND % json.dumps(params), args.target, 60)
+
+
+def cmd_inspect(args, token=None):
+    node = node_from(args)
+    if not node:
+        sys.exit("inspect needs --node or a URL containing node-id")
+    run_js_emit(JS_INSPECT % json.dumps(node), args.target, 30)
+
+
+def cmd_components(args, token=None):
+    run_js_emit(JS_COMPONENTS, args.target, 60)
+
+
+def save_export(value, out_dir, node):
+    os.makedirs(out_dir, exist_ok=True)
+    stem = node.replace(":", "-")
+    if value.get("format") == "SVG":
+        path = os.path.join(out_dir, stem + ".svg")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(value["text"])
+    else:
+        path = os.path.join(out_dir, f"{stem}.{value['format'].lower()}")
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(value["base64"]))
+    return path
+
+
+def cmd_export(args, token=None):
+    node = node_from(args)
+    if not node:
+        sys.exit("export needs --node or a URL containing node-id")
+    params = {"node": node, "format": args.format.upper(), "scale": args.scale}
+    out = run_js(JS_EXPORT % json.dumps(params), args.target, 60)
+    value = out.get("value") or {}
+    if not out.get("ok") or value.get("error"):
+        emit({"_source": "plugin", **out})
+        return
+    emit({"_source": "plugin", "name": value.get("name"),
+          "saved": save_export(value, args.out, node)})
+
+
+def cmd_text(args, token=None):
+    if args.replace:
+        params = {"from": args.replace[0], "to": args.replace[1]}
+        run_js_emit(JS_TEXT_REPLACE % json.dumps(params), args.target, 120)
+    else:
+        run_js_emit(JS_TEXT, args.target, 60)
 
 
 # --- file list, opening, launch agent -----------------------------------------
@@ -1012,6 +1200,36 @@ def build_parser():
         w = sub.add_parser(name, help=help_text)
         w.add_argument("target", nargs="?")
         w.set_defaults(fn=fn, needs_token=False)
+
+    fi = sub.add_parser("find", help="find nodes by name or type on the current page")
+    fi.add_argument("target", nargs="?")
+    fi.add_argument("--name", help="substring, case-insensitive")
+    fi.add_argument("--type", help="comma separated node types, e.g. FRAME,TEXT")
+    fi.add_argument("--limit", type=int, default=50)
+    fi.set_defaults(fn=cmd_find, needs_token=False)
+
+    ins = sub.add_parser("inspect", help="one node's properties, normalized")
+    ins.add_argument("target", nargs="?")
+    ins.add_argument("--node", help="node id (or use a URL with node-id)")
+    ins.set_defaults(fn=cmd_inspect, needs_token=False)
+
+    co = sub.add_parser("components", help="components and variant sets on the page")
+    co.add_argument("target", nargs="?")
+    co.set_defaults(fn=cmd_components, needs_token=False)
+
+    ex = sub.add_parser("export", help="export a node via the plugin — no REST quota")
+    ex.add_argument("target", nargs="?")
+    ex.add_argument("--node", help="node id (or use a URL with node-id)")
+    ex.add_argument("--format", default="png", choices=["png", "jpg", "svg", "pdf"])
+    ex.add_argument("--scale", type=float, default=2.0)
+    ex.add_argument("--out", default=".", help="directory to save into")
+    ex.set_defaults(fn=cmd_export, needs_token=False)
+
+    tx = sub.add_parser("text", help="read every text node, or replace a string in all of them")
+    tx.add_argument("target", nargs="?")
+    tx.add_argument("--replace", nargs=2, metavar=("FROM", "TO"),
+                    help="replace FROM with TO in every text node")
+    tx.set_defaults(fn=cmd_text, needs_token=False)
     return p
 
 

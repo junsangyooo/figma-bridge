@@ -73,6 +73,13 @@ python3 figma.py setup
 | `tokens` | 로컬 변수와 스타일을 값까지 |
 | `selection` | 지금 선택한 노드 |
 | `pages` | 열린 파일의 페이지 목록 |
+| `find [--name] [--type] [--limit]` | 이름·타입으로 노드 찾기 |
+| `inspect --node <id>` | 노드 하나의 속성 (색·레이아웃·텍스트·변수 바인딩) |
+| `components` | 현재 페이지의 컴포넌트와 변형 세트 |
+| `export --node <id> [--format] [--scale] [--out]` | 노드 내보내기. **REST 한도를 쓰지 않는다** |
+| `text [--replace FROM TO]` | 모든 텍스트 조회, 또는 일괄 교체 |
+
+아래 넷은 `exec`로 매번 쓰던 JS를 줄인 것뿐이다. 더 복잡한 작업은 여전히 `exec`로 한다.
 
 `exec`에 URL을 같이 주면 플러그인이 붙은 파일과 대조해서 **다른 파일에 잘못 쓰는 것을 막는다.**
 

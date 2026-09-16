@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Offline checks: URL parsing, node normalization, and the file list."""
+"""Offline checks: URL parsing, node normalization, the file list, and exports."""
+import base64
 import json
 import os
 import tempfile
@@ -109,6 +110,20 @@ def test_hidden_and_favorites(tmp):
     assert [f["key"] for f in figma.list_files()] == ["AAAAAAAAAAAA"]
 
 
+def test_save_export(tmp):
+    raw = b"\x89PNG\r\n\x1a\n binary"
+    png = figma.save_export({"format": "PNG", "base64": base64.b64encode(raw).decode()},
+                            tmp, "1:2")
+    assert png.endswith("1-2.png"), png          # ':' is not usable in a filename
+    with open(png, "rb") as f:
+        assert f.read() == raw, "binary survives the base64 round trip"
+
+    svg = figma.save_export({"format": "SVG", "text": "<svg/>"}, tmp, "3:4")
+    assert svg.endswith("3-4.svg"), svg
+    with open(svg, encoding="utf-8") as f:
+        assert f.read() == "<svg/>"
+
+
 def test_wants_verify():
     assert figma.wants_verify("verify") is True, "a valueless flag still counts"
     assert figma.wants_verify("verify=1") is True
@@ -134,4 +149,5 @@ if __name__ == "__main__":
     test_same_file()
     with tempfile.TemporaryDirectory() as tmp:
         test_hidden_and_favorites(tmp)
+        test_save_export(tmp)
     print("ok")
