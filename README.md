@@ -11,6 +11,19 @@ Figma를 AI 에이전트가 읽고 쓰기 위한 독립 도구 모음. 기능마
 
 라우팅 규칙은 `~/.claude/skills/figma-bridge/SKILL.md`에 있다.
 
+## 앱으로 쓰기
+
+```bash
+python3 figma.py serve            # 웹 UI + 릴레이
+python3 figma.py install-agent    # 로그인할 때 자동 실행 (launchd)
+```
+
+브라우저에서 `http://localhost:3055/` 를 열면 파일 목록이 뜬다. 카드를 누르면 `figma://file/<key>` 딥링크로 Figma 데스크톱이 그 파일을 연다.
+
+**목록은 어디서 오는가.** REST에는 사용자의 파일을 나열하는 엔드포인트가 없다(드래프트는 API 모델에 아예 없고, team_id조차 프로그램으로 얻을 수 없다). 그래서 Figma 데스크톱이 기록한 열린 탭(`~/Library/Application Support/Figma/settings.json`)을 읽고, 여기에 직접 고정한 파일을 합친다. 이 파일은 비공식 내부 포맷이라 Figma 버전업으로 바뀔 수 있다.
+
+**플러그인 자동 실행은 보장되지 않는다.** 외부에서 Figma 플러그인을 실행하는 공개 방법이 없어서, "열 때 플러그인도 실행"을 켜면 AppleScript로 명령 팔레트(⌘/)를 열고 이름을 입력하는 방식으로 흉내 낸다. **손쉬운 사용 권한이 필요하고, 파일 로딩이 늦으면 실패한다.** 실패해도 파일은 열리므로 플러그인만 직접 실행하면 된다.
+
 ## 새 머신 세팅
 
 의존성 없음. Python 3.9 이상이면 `git clone` 직후 바로 돈다.

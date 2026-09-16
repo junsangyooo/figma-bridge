@@ -12,6 +12,7 @@ import re
 import shutil
 import socket
 import socketserver
+import subprocess
 import sys
 import threading
 import time
@@ -323,19 +324,33 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, obj=None):
-        body = b"" if obj is None else json.dumps(obj, ensure_ascii=False).encode()
+    def _send(self, code, obj=None, raw=None, content_type="application/json", cors=True):
+        body = raw if raw is not None else (
+            b"" if obj is None else json.dumps(obj, ensure_ascii=False).encode())
         self.send_response(code)
-        # The plugin iframe has a null origin, so it needs a wildcard. Access is
-        # gated by X-Relay-Token, not by this header — see _authorized().
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Relay-Token")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Content-Type", "application/json")
+        if cors:
+            # The plugin iframe has a null origin, so it needs a wildcard. Access is
+            # gated by X-Relay-Token, not by this header — see _authorized().
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Relay-Token")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if body:
             self.wfile.write(body)
+
+    def _send_page(self):
+        """The page carries the token, so it must never be readable cross-origin:
+        sent with no CORS headers, which makes another site's fetch opaque."""
+        try:
+            with open(os.path.join(HERE, "web", "index.html"), encoding="utf-8") as f:
+                html = f.read()
+        except OSError as e:
+            self._send(500, {"error": str(e)}, cors=False)
+            return
+        html = html.replace("__RELAY_TOKEN__", STATE.token or "")
+        self._send(200, raw=html.encode(), content_type="text/html; charset=utf-8", cors=False)
 
     def _read(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -362,9 +377,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._send(204)
 
     def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            self._send_page()
+            return
         if not self._authorized():
             return
-        self._send(200, STATE.status()) if self.path == "/status" else self._send(404, {"error": "not found"})
+        if self.path == "/status":
+            self._send(200, STATE.status())
+        elif self.path == "/files":
+            self._send(200, {"files": list_files()})
+        else:
+            self._send(404, {"error": "not found"})
 
     def do_POST(self):
         if not self._authorized():
@@ -378,6 +401,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/job":
             payload = self._read()
             self._send(200, STATE.submit(payload.get("code", ""), payload.get("timeout", 60)))
+        elif self.path == "/open":
+            payload = self._read()
+            self._send(200, open_in_figma(payload.get("key"), payload.get("autorun", False)))
+        elif self.path == "/favorites":
+            self._send(200, {"favorites": edit_favorites(self._read())})
         else:
             self._send(404, {"error": "not found"})
 
@@ -430,8 +458,8 @@ def cmd_relay(args, token=None):
         threading.Thread(target=s.serve_forever, daemon=True).start()
 
     listening = ", ".join(f"{s.server_address[0]}:{RELAY_PORT}" for s in servers)
-    print(f"relay on {listening} — import {os.path.join(HERE, 'plugin')} in Figma "
-          f"(Plugins > Development) and run figma-bridge. Ctrl-C to stop.")
+    print(f"listening on {listening} — open {RELAY}/ for the file list. Ctrl-C to stop.")
+    print(f"plugin: import {os.path.join(HERE, 'plugin')} in Figma (Plugins > Development)")
     print(f"\nplugin token (paste it into the plugin window once):\n  {STATE.token}\n")
     try:
         servers[0].serve_forever()
@@ -512,6 +540,166 @@ def cmd_selection(args, token=None):
 
 def cmd_pages(args, token=None):
     run_js(JS_PAGES, args.target, 30)
+
+
+# --- file list, opening, launch agent -----------------------------------------
+
+FAVORITES_FILE = os.path.expanduser("~/.figma-bridge/favorites.json")
+FIGMA_SETTINGS = os.path.expanduser("~/Library/Application Support/Figma/settings.json")
+AGENT_LABEL = "dev.jsyoo.figma-bridge"
+AGENT_PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{AGENT_LABEL}.plist")
+
+
+def parse_tabs(settings):
+    """Figma desktop records every open tab, which is the closest thing to a file
+    list that exists: REST has no endpoint for a user's own files, and drafts are
+    not in the API model at all."""
+    found = {}
+    for window in settings.get("windows", []):
+        for tab in window.get("tabs", []):
+            match = re.match(r"^/file/([0-9A-Za-z]{10,128})", tab.get("path") or "")
+            if not match or tab.get("isDiscarded"):
+                continue
+            entry = {"key": match.group(1), "title": tab.get("title") or "(제목 없음)",
+                     "source": "tab"}
+            for src, dst in (("editorType", "editorType"), ("lastViewedAt", "lastViewedAt")):
+                if tab.get(src) is not None:
+                    entry[dst] = tab[src]
+            thumb = (tab.get("thumbnail") or {}).get("url")
+            if thumb:
+                entry["thumbnail"] = thumb
+            if tab.get("isPinned"):
+                entry["pinnedInFigma"] = True
+            prior = found.get(entry["key"])
+            if not prior or entry.get("lastViewedAt", 0) > prior.get("lastViewedAt", 0):
+                found[entry["key"]] = entry
+    return list(found.values())
+
+
+def read_favorites():
+    try:
+        with open(FAVORITES_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
+
+
+def edit_favorites(payload):
+    favorites = read_favorites()
+    action, key = payload.get("action"), payload.get("key")
+    if action == "add":
+        key, _ = parse_target(payload.get("url") or key or "")
+        if key and not any(f["key"] == key for f in favorites):
+            favorites.append({"key": key, "title": payload.get("title") or key})
+    elif action == "remove":
+        favorites = [f for f in favorites if f["key"] != key]
+    os.makedirs(os.path.dirname(FAVORITES_FILE), mode=0o700, exist_ok=True)
+    with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
+        json.dump(favorites, f, ensure_ascii=False, indent=2)
+    return favorites
+
+
+def list_files():
+    try:
+        with open(FIGMA_SETTINGS, encoding="utf-8") as f:
+            tabs = parse_tabs(json.load(f))
+    except (OSError, ValueError):
+        tabs = []
+
+    by_key = {t["key"]: t for t in tabs}
+    for fav in read_favorites():
+        entry = by_key.setdefault(fav["key"], {"key": fav["key"], "title": fav["title"],
+                                               "source": "favorite"})
+        entry["favorite"] = True
+
+    return sorted(by_key.values(),
+                  key=lambda f: (not f.get("favorite"), -f.get("lastViewedAt", 0)))
+
+
+# Figma exposes no way to trigger a plugin from outside, so this drives the
+# command palette: ⌘/ then the plugin name. Needs Accessibility permission.
+QUICK_ACTIONS = '''
+tell application "Figma" to activate
+delay {wait}
+tell application "System Events"
+    keystroke "/" using {{command down}}
+    delay 0.5
+    keystroke "{name}"
+    delay 0.9
+    key code 36
+end tell
+'''
+
+
+def run_plugin(name="figma-bridge", wait=3.0):
+    proc = subprocess.run(["osascript", "-e", QUICK_ACTIONS.format(name=name, wait=wait)],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        return {"ok": False, "error": proc.stderr.strip()[:300],
+                "hint": "시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 이 프로그램을 허용하세요"}
+    return {"ok": True, "note": "명령 팔레트로 실행을 시도했습니다 — 플러그인 창을 확인하세요"}
+
+
+def open_in_figma(key, autorun=False):
+    if not key:
+        return {"ok": False, "error": "key required"}
+    # The figma: scheme routes to the desktop app explicitly, unlike an https URL.
+    subprocess.run(["open", f"figma://file/{key}"], check=False)
+    result = {"ok": True, "opened": key}
+    if autorun:
+        result["plugin"] = run_plugin()
+    return result
+
+
+def cmd_open(args, token=None):
+    key, _ = parse_target(args.target)
+    emit(open_in_figma(key, args.autorun))
+
+
+def cmd_files(args, token=None):
+    emit({"_source": "local", "files": list_files()})
+
+
+PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array><string>{python}</string><string>{script}</string><string>serve</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>{log}</string>
+  <key>StandardErrorPath</key><string>{log}</string>
+</dict>
+</plist>
+"""
+
+
+def cmd_install_agent(args, token=None):
+    log = os.path.expanduser("~/.figma-bridge/relay.log")
+    os.makedirs(os.path.dirname(log), mode=0o700, exist_ok=True)
+    os.makedirs(os.path.dirname(AGENT_PLIST), exist_ok=True)
+    with open(AGENT_PLIST, "w", encoding="utf-8") as f:
+        f.write(PLIST.format(label=AGENT_LABEL, python=sys.executable,
+                             script=os.path.abspath(__file__), log=log))
+
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{AGENT_LABEL}"],
+                   capture_output=True)  # ignore "not loaded"
+    out = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", AGENT_PLIST],
+                         capture_output=True, text=True)
+    emit({"plist": AGENT_PLIST, "log": log, "loaded": out.returncode == 0,
+          "error": out.stderr.strip() or None, "url": RELAY + "/"})
+
+
+def cmd_uninstall_agent(args, token=None):
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{AGENT_LABEL}"],
+                   capture_output=True)
+    existed = os.path.exists(AGENT_PLIST)
+    if existed:
+        os.remove(AGENT_PLIST)
+    emit({"removed": existed, "plist": AGENT_PLIST})
 
 
 def cmd_setup(args, token=None):
@@ -600,10 +788,26 @@ def build_parser():
     # --- plugin route (no REST token needed) ---
     sub.add_parser("setup", help="check this machine and print setup steps") \
         .set_defaults(fn=cmd_setup, needs_token=False)
-    r = sub.add_parser("relay", help="run the local relay the Figma plugin talks to")
-    r.add_argument("--rotate", action="store_true",
-                   help="mint a new token instead of reusing the stored one")
-    r.set_defaults(fn=cmd_relay, needs_token=False)
+    for name, help_text in (("serve", "run the app: web UI plus the plugin relay"),
+                            ("relay", "same as serve (kept for muscle memory)")):
+        r = sub.add_parser(name, help=help_text)
+        r.add_argument("--rotate", action="store_true",
+                       help="mint a new token instead of reusing the stored one")
+        r.set_defaults(fn=cmd_relay, needs_token=False)
+
+    sub.add_parser("files", help="files Figma has open or you pinned") \
+        .set_defaults(fn=cmd_files, needs_token=False)
+
+    o = sub.add_parser("open", help="open a file in the Figma desktop app")
+    o.add_argument("target", help="figma URL or file key")
+    o.add_argument("--autorun", action="store_true",
+                   help="also try to start the plugin via the command palette")
+    o.set_defaults(fn=cmd_open, needs_token=False)
+
+    sub.add_parser("install-agent", help="start the app at login (launchd)") \
+        .set_defaults(fn=cmd_install_agent, needs_token=False)
+    sub.add_parser("uninstall-agent", help="stop starting the app at login") \
+        .set_defaults(fn=cmd_uninstall_agent, needs_token=False)
 
     e = sub.add_parser("exec", help="run Plugin API JS in the open file")
     e.add_argument("target", nargs="?", help="figma URL — guards against the wrong file being open")

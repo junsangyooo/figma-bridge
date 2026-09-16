@@ -56,7 +56,26 @@ def test_norm_node():
     assert "children" not in pruned["children"][0], "pruned level reports count only"
 
 
+def test_parse_tabs():
+    settings = {"windows": [{"tabs": [
+        {"path": "/file/wGQwH64K68FhUpn2lFw1Tr", "title": "Nomm", "editorType": "design",
+         "lastViewedAt": 1789542520954, "thumbnail": {"url": "https://s3/x"}},
+        # same file seen again in another window — keep the newer view
+        {"path": "/file/wGQwH64K68FhUpn2lFw1Tr", "title": "Nomm", "lastViewedAt": 1},
+        {"path": "/file/ABCdef123456", "title": "닫힌 탭", "isDiscarded": True},
+        {"path": "/files/recent", "title": "파일 브라우저"},
+    ]}]}
+
+    tabs = figma.parse_tabs(settings)
+    assert [t["key"] for t in tabs] == ["wGQwH64K68FhUpn2lFw1Tr"], tabs
+    assert tabs[0]["lastViewedAt"] == 1789542520954, "newer view wins"
+    assert tabs[0]["thumbnail"] == "https://s3/x"
+    assert "pinnedInFigma" not in tabs[0], "absent flags stay absent"
+    assert figma.parse_tabs({}) == []
+
+
 if __name__ == "__main__":
     test_parse_target()
     test_norm_node()
+    test_parse_tabs()
     print("ok")

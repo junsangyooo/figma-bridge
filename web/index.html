@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>figma-bridge</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --card: #fff; --line: #e6e7e9; --ink: #1a1a1f;
+    --muted: #6b707a; --accent: #2ecba0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px 64px; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 -apple-system, system-ui, "Pretendard", sans-serif;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  .status { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #c8ccd4; }
+  .dot.on { background: var(--accent); }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 13px; }
+
+  .bar { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
+  input[type=text] {
+    flex: 1; min-width: 240px; padding: 9px 12px; border: 1px solid var(--line);
+    border-radius: 7px; font: inherit; background: var(--card);
+  }
+  input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+  button {
+    padding: 9px 14px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--card); color: var(--ink); font: inherit; cursor: pointer;
+  }
+  button:hover { border-color: #cfd2d7; }
+  button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+  label.toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden; cursor: pointer; text-align: left; padding: 0; display: block;
+  }
+  .card:hover { border-color: #cfd2d7; }
+  .thumb { width: 100%; aspect-ratio: 16/10; object-fit: cover; background: #f1f2f4; display: block; }
+  .thumb.empty { display: flex; align-items: center; justify-content: center; color: #c2c6cc; font-size: 24px; }
+  .meta { padding: 11px 13px 13px; }
+  .name { font-weight: 600; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .when { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
+  .star { background: none; border: 0; padding: 0; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .star.on { color: var(--accent); }
+  .empty-state { color: var(--muted); padding: 40px 0; text-align: center; }
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: var(--ink); color: #fff; padding: 10px 16px; border-radius: 8px;
+    font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>figma-bridge</h1>
+    <div class="status"><span class="dot" id="dot"></span><span id="state">확인 중</span></div>
+  </header>
+  <p class="sub" id="sub">파일을 누르면 Figma 데스크톱에서 열립니다.</p>
+
+  <div class="bar">
+    <input type="text" id="url" placeholder="Figma URL을 붙여넣어 고정하기">
+    <button id="pin">고정</button>
+    <label class="toggle"><input type="checkbox" id="autorun"> 열 때 플러그인도 실행</label>
+    <button id="refresh">새로고침</button>
+  </div>
+
+  <div class="grid" id="grid"></div>
+  <div class="empty-state" id="empty" hidden>표시할 파일이 없습니다. Figma에서 파일을 한 번 열거나 위에 URL을 붙여넣으세요.</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const TOKEN = "__RELAY_TOKEN__";
+const H = { "Content-Type": "application/json", "X-Relay-Token": TOKEN };
+
+const $ = (id) => document.getElementById(id);
+let toastTimer;
+
+function toast(msg) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+}
+
+function ago(ms) {
+  if (!ms) return "";
+  const m = Math.floor((Date.now() - ms) / 60000);
+  if (m < 1) return "방금";
+  if (m < 60) return m + "분 전";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "시간 전";
+  const d = Math.floor(h / 24);
+  return d < 30 ? d + "일 전" : Math.floor(d / 30) + "개월 전";
+}
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined
+    ? { headers: H }
+    : { method: "POST", headers: H, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(path + " → " + res.status);
+  return res.json();
+}
+
+async function refreshStatus() {
+  try {
+    const s = await api("/status");
+    $("dot").className = "dot" + (s.pluginConnected ? " on" : "");
+    if (s.pluginConnected) {
+      const name = (s.file && s.file.fileName) || "알 수 없는 파일";
+      $("state").textContent = "플러그인 연결됨 — " + name;
+    } else {
+      $("state").textContent = "플러그인 미연결 (읽기는 가능)";
+    }
+  } catch (e) {
+    $("dot").className = "dot";
+    $("state").textContent = "서버 응답 없음";
+  }
+}
+
+function card(file) {
+  const el = document.createElement("div");
+  el.className = "card";
+
+  const thumb = file.thumbnail
+    ? `<img class="thumb" src="${file.thumbnail}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'thumb empty',textContent:'◻'}))">`
+    : `<div class="thumb empty">◻</div>`;
+
+  el.innerHTML = thumb + `
+    <div class="meta">
+      <div class="name">${file.title.replace(/</g, "&lt;")}</div>
+      <div class="when">
+        <span>${file.editorType || ""} ${ago(file.lastViewedAt)}</span>
+        <button class="star ${file.favorite ? "on" : ""}">${file.favorite ? "고정됨" : "고정"}</button>
+      </div>
+    </div>`;
+
+  el.querySelector(".star").onclick = async (ev) => {
+    ev.stopPropagation();
+    await api("/favorites", file.favorite
+      ? { action: "remove", key: file.key }
+      : { action: "add", key: file.key, title: file.title });
+    load();
+  };
+
+  el.onclick = async () => {
+    const autorun = $("autorun").checked;
+    toast(file.title + " 여는 중…");
+    const out = await api("/open", { key: file.key, autorun });
+    if (out.plugin && !out.plugin.ok) toast("열었지만 플러그인 실행 실패: " + (out.plugin.hint || out.plugin.error));
+    else if (autorun) toast("열고 플러그인 실행을 시도했습니다");
+    else toast("열었습니다");
+  };
+  return el;
+}
+
+async function load() {
+  const { files } = await api("/files");
+  const grid = $("grid");
+  grid.innerHTML = "";
+  files.forEach((f) => grid.appendChild(card(f)));
+  $("empty").hidden = files.length > 0;
+}
+
+$("pin").onclick = async () => {
+  const url = $("url").value.trim();
+  if (!url) return;
+  await api("/favorites", { action: "add", url });
+  $("url").value = "";
+  load();
+};
+$("refresh").onclick = load;
+$("autorun").checked = localStorage.getItem("autorun") === "1";
+$("autorun").onchange = (e) => localStorage.setItem("autorun", e.target.checked ? "1" : "0");
+
+load().catch((e) => toast(String(e)));
+refreshStatus();
+setInterval(refreshStatus, 2000);
+</script>
+</body>
+</html>
