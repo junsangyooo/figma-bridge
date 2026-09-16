@@ -356,17 +356,26 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def _host_ok(self):
+        """Blocks DNS rebinding: a name the attacker controls that resolves to
+        127.0.0.1 would otherwise be same-origin, making CORS useless and the
+        token in the served page readable. Applies to every route, the HTML
+        page included, because that page carries the token.
+        """
+        host = (self.headers.get("Host") or "").strip()
+        if host in (f"127.0.0.1:{RELAY_PORT}", f"localhost:{RELAY_PORT}", f"[::1]:{RELAY_PORT}"):
+            return True
+        self._send(403, {"error": f"unexpected Host: {host}"}, cors=False)
+        return False
+
     def _authorized(self):
         """This endpoint executes code, so a page the user visits must not reach it.
 
         CORS alone does not help: it gates reading the response, not delivering the
         request, and a sandboxed iframe can forge `Origin: null`. The shared secret
-        forces a preflight the attacker cannot satisfy; the Host check blocks DNS
-        rebinding from a name that resolves to 127.0.0.1.
+        forces a preflight the attacker cannot satisfy.
         """
-        host = (self.headers.get("Host") or "").strip()
-        if host not in (f"127.0.0.1:{RELAY_PORT}", f"localhost:{RELAY_PORT}", f"[::1]:{RELAY_PORT}"):
-            self._send(403, {"error": f"unexpected Host: {host}"})
+        if not self._host_ok():
             return False
         if not STATE.token or self.headers.get("X-Relay-Token") != STATE.token:
             self._send(403, {"error": "missing or wrong X-Relay-Token"})
@@ -374,11 +383,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         return True
 
     def do_OPTIONS(self):
-        self._send(204)
+        if self._host_ok():
+            self._send(204)
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):
-            self._send_page()
+            if self._host_ok():
+                self._send_page()
             return
         if not self._authorized():
             return
@@ -669,6 +680,8 @@ PLIST = """<?xml version="1.0" encoding="UTF-8"?>
   <array><string>{python}</string><string>{script}</string><string>serve</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict><key>PYTHONUNBUFFERED</key><string>1</string></dict>
   <key>StandardOutPath</key><string>{log}</string>
   <key>StandardErrorPath</key><string>{log}</string>
 </dict>
