@@ -348,7 +348,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         rebinding from a name that resolves to 127.0.0.1.
         """
         host = (self.headers.get("Host") or "").strip()
-        if host not in (f"127.0.0.1:{RELAY_PORT}", f"localhost:{RELAY_PORT}"):
+        if host not in (f"127.0.0.1:{RELAY_PORT}", f"localhost:{RELAY_PORT}", f"[::1]:{RELAY_PORT}"):
             self._send(403, {"error": f"unexpected Host: {host}"})
             return False
         if not STATE.token or self.headers.get("X-Relay-Token") != STATE.token:
