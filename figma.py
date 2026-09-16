@@ -996,7 +996,28 @@ def open_in_figma(key, autorun=False, wait=6.0):
 
 def cmd_open(args, token=None):
     key, _ = parse_target(args.target)
-    emit(open_in_figma(key, args.autorun, args.wait))
+    if not args.autorun:
+        emit(open_in_figma(key))
+        return
+
+    wanted = file_meta(key)[1]
+
+    def attached():
+        status = relay_call("/status")
+        name = (status.get("file") or {}).get("fileName")
+        return status["pluginConnected"] and same_file(name, wanted) is not False, name
+
+    connected, name = attached()
+    result = {"opened": key, "alreadyConnected": connected}
+    if not connected:
+        # Keystrokes go through the relay: Accessibility is granted to the launchd
+        # Python, while a process started from an agent's terminal gets refused.
+        result.update(relay_call("/open", {"key": key, "autorun": True, "wait": args.wait}))
+        deadline = time.time() + 20
+        while result["plugin"]["ok"] and not connected and time.time() < deadline:
+            time.sleep(1)
+            connected, name = attached()
+    emit({**result, "ok": connected, "connected": connected, "file": name})
 
 
 def cmd_files(args, token=None):
