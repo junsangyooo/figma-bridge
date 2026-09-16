@@ -642,12 +642,21 @@ end tell
 '''
 
 
+def accessibility_target():
+    """What macOS actually lists in Accessibility: the interpreter's .app bundle
+    when there is one, since keystrokes are attributed to the calling process."""
+    real = os.path.realpath(sys.executable)
+    bundle = os.path.join(os.path.dirname(os.path.dirname(real)), "Resources", "Python.app")
+    return bundle if os.path.exists(bundle) else real
+
+
 def run_plugin(name="figma-bridge", wait=3.0):
     proc = subprocess.run(["osascript", "-e", QUICK_ACTIONS.format(name=name, wait=wait)],
                           capture_output=True, text=True)
     if proc.returncode != 0:
         return {"ok": False, "error": proc.stderr.strip()[:300],
-                "hint": "시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 이 프로그램을 허용하세요"}
+                "hint": "시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에 아래 항목을 추가하세요",
+                "add": accessibility_target()}
     return {"ok": True, "note": "명령 팔레트로 실행을 시도했습니다 — 플러그인 창을 확인하세요"}
 
 
