@@ -19,7 +19,8 @@
 </div>
 
 <script>
-  var RELAY = "http://127.0.0.1:3055";
+  // Must match devAllowedDomains in manifest.json — Figma rejects a raw IP there.
+  var RELAY = "http://localhost:3055";
   var meta = { fileKey: null, fileName: null, editorType: null };
   var token = null;
   var online = false;

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import socketserver
 import sys
 import threading
@@ -384,6 +385,15 @@ class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+class _Server6(_Server):
+    """`localhost` resolves to ::1 first on macOS, so listen there too.
+
+    Each listener binds a loopback address explicitly — never "::" or "0.0.0.0",
+    which would expose an endpoint that executes code to the network.
+    """
+    address_family = socket.AF_INET6
+
+
 def relay_call(path, payload=None, timeout=70):
     secret = read_relay_token()
     if not secret:
@@ -406,12 +416,21 @@ def cmd_relay(args, token=None):
     with open(os.open(RELAY_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
         f.write(STATE.token)
 
-    server = _Server(("127.0.0.1", RELAY_PORT), _Handler)
-    print(f"relay on {RELAY} — import {os.path.join(HERE, 'plugin')} in Figma "
+    servers = [_Server(("127.0.0.1", RELAY_PORT), _Handler)]
+    try:
+        servers.append(_Server6(("::1", RELAY_PORT), _Handler))
+    except OSError as e:
+        print(f"note: no IPv6 loopback listener ({e}) — localhost must fall back to 127.0.0.1")
+
+    for s in servers[1:]:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+
+    listening = ", ".join(f"{s.server_address[0]}:{RELAY_PORT}" for s in servers)
+    print(f"relay on {listening} — import {os.path.join(HERE, 'plugin')} in Figma "
           f"(Plugins > Development) and run figma-bridge. Ctrl-C to stop.")
     print(f"\nplugin token (paste it into the plugin window once):\n  {STATE.token}\n")
     try:
-        server.serve_forever()
+        servers[0].serve_forever()
     except KeyboardInterrupt:
         print("stopped")
 

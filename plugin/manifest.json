@@ -8,7 +8,7 @@
   "documentAccess": "dynamic-page",
   "networkAccess": {
     "allowedDomains": ["none"],
-    "devAllowedDomains": ["http://127.0.0.1:3055", "http://localhost:3055"],
+    "devAllowedDomains": ["http://localhost:3055"],
     "reasoning": "Local relay on 127.0.0.1 only; carries agent-issued Plugin API jobs."
   }
 }
