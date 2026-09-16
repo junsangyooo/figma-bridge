@@ -66,7 +66,9 @@ python3 figma.py setup
 | 명령 | 하는 일 |
 |---|---|
 | `setup` | 머신 점검과 절차 출력 |
-| `relay` | 릴레이 실행 (켜 둔 채로 사용) |
+| `serve` | 웹 UI와 릴레이 실행 (켜 둔 채로 사용) |
+| `files [--verify] [--clean]` | 파일 목록. `--verify`는 존재 확인, `--clean`은 없어진 것 숨김 |
+| `unhide <url> \| --all` | 숨긴 파일 되돌리기 |
 | `exec [url] --code '...'` | **Plugin API JS를 그대로 실행.** 쓰기를 포함한 모든 기능 |
 | `tokens` | 로컬 변수와 스타일을 값까지 |
 | `selection` | 지금 선택한 노드 |

@@ -140,6 +140,8 @@ python3 figma.py open <파일URL> --autorun
 | `exec` 가 `plugin not connected` | 작업할 파일을 열고 플러그인을 실행했는지 확인. 창을 닫았으면 다시 실행 |
 | `exec` 코드가 `not a function` | `use_figma` 전용 API를 쓴 것. `createAutoLayout`·`query`·`set`·`screenshot`·`placeholder`는 실제 Plugin API에 없다 |
 | `install-agent` 후에도 응답 없음 | 재등록 직후 잠깐 끊긴다. `curl --retry 15 --retry-delay 1 --retry-connrefused http://localhost:3055/status` 로 기다린다. 그래도 없으면 `launchctl print gui/$(id -u)/dev.jsyoo.figma-bridge` 와 `~/.figma-bridge/relay.log` 를 본다 |
+| 지워진 파일이 목록에 남음 | Figma에 탭이 열려 있으면 기록에 남는다. UI의 **정리** 버튼(또는 `files --clean`)이 존재를 확인해 없어진 것만 숨긴다. 확인하지 못한 파일은 건드리지 않는다 |
+| 숨긴 파일을 되돌리고 싶음 | UI 상단의 "모두 되돌리기" 또는 `unhide <url>` / `unhide --all` |
 | REST가 429 | 분당 한도(Tier1 10회)를 넘었다. `Retry-After` 만큼 기다리거나 `--depth` 로 요청을 줄인다 |
 | `ping` 이 403 | 토큰 만료 또는 스코프 부족. 1단계로 재발급 |
 

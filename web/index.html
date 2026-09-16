@@ -47,8 +47,12 @@
   .meta { padding: 11px 13px 13px; }
   .name { font-weight: 600; margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .when { color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
-  .star { background: none; border: 0; padding: 0; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .star, .hide { background: none; border: 0; padding: 0; font-size: 12px; color: var(--muted); cursor: pointer; }
   .star.on { color: var(--accent); }
+  .actions { display: flex; gap: 10px; }
+  .card.missing { opacity: 0.45; }
+  .card.missing .name::after { content: " · 없어짐"; color: #c0392b; font-weight: 400; }
+  .link { background: none; border: 0; padding: 0; color: var(--ink); font: inherit; text-decoration: underline; cursor: pointer; }
   .empty-state { color: var(--muted); padding: 40px 0; text-align: center; }
   .toast {
     position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
@@ -70,8 +74,10 @@
     <input type="text" id="url" placeholder="Figma URL을 붙여넣어 고정하기">
     <button id="pin">고정</button>
     <label class="toggle"><input type="checkbox" id="autorun"> 열 때 플러그인도 실행</label>
+    <button id="clean">정리</button>
     <button id="refresh">새로고침</button>
   </div>
+  <p class="sub" id="hidden-note" hidden></p>
 
   <div class="grid" id="grid"></div>
   <div class="empty-state" id="empty" hidden>표시할 파일이 없습니다. Figma에서 파일을 한 번 열거나 위에 URL을 붙여넣으세요.</div>
@@ -136,12 +142,17 @@ function card(file) {
     ? `<img class="thumb" src="${file.thumbnail}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'thumb empty',textContent:'◻'}))">`
     : `<div class="thumb empty">◻</div>`;
 
+  if (file.missing) el.classList.add("missing");
+
   el.innerHTML = thumb + `
     <div class="meta">
       <div class="name">${file.title.replace(/</g, "&lt;")}</div>
       <div class="when">
         <span>${file.editorType || ""} ${ago(file.lastViewedAt)}</span>
-        <button class="star ${file.favorite ? "on" : ""}">${file.favorite ? "고정됨" : "고정"}</button>
+        <span class="actions">
+          <button class="star ${file.favorite ? "on" : ""}">${file.favorite ? "고정됨" : "고정"}</button>
+          <button class="hide">숨기기</button>
+        </span>
       </div>
     </div>`;
 
@@ -150,6 +161,13 @@ function card(file) {
     await api("/favorites", file.favorite
       ? { action: "remove", key: file.key }
       : { action: "add", key: file.key, title: file.title });
+    load();
+  };
+
+  el.querySelector(".hide").onclick = async (ev) => {
+    ev.stopPropagation();
+    await api("/hidden", { action: "hide", key: file.key });
+    toast(file.title + " 숨겼습니다");
     load();
   };
 
@@ -164,12 +182,22 @@ function card(file) {
   return el;
 }
 
-async function load() {
-  const { files } = await api("/files");
+async function load(verify) {
+  const { files, hidden } = await api(verify ? "/files?verify" : "/files");
   const grid = $("grid");
   grid.innerHTML = "";
   files.forEach((f) => grid.appendChild(card(f)));
   $("empty").hidden = files.length > 0;
+
+  const note = $("hidden-note");
+  note.hidden = !hidden || hidden.length === 0;
+  if (!note.hidden) {
+    note.innerHTML = `숨긴 파일 ${hidden.length}개 · <button class="link" id="unhide">모두 되돌리기</button>`;
+    $("unhide").onclick = async () => {
+      await api("/hidden", { action: "clear" });
+      load();
+    };
+  }
 }
 
 $("pin").onclick = async () => {
@@ -179,7 +207,17 @@ $("pin").onclick = async () => {
   $("url").value = "";
   load();
 };
-$("refresh").onclick = load;
+$("refresh").onclick = () => load();
+
+$("clean").onclick = async () => {
+  toast("확인 중…");
+  const out = await api("/clean", {});
+  await load();
+  const parts = [`없어진 파일 ${out.hidden.length}개 숨김`];
+  // Files we could not check stay put: a network hiccup must not hide a live file.
+  if (out.unverified.length) parts.push(`확인 못 한 파일 ${out.unverified.length}개는 그대로`);
+  toast(parts.join(" · "));
+};
 $("autorun").checked = localStorage.getItem("autorun") === "1";
 $("autorun").onchange = (e) => localStorage.setItem("autorun", e.target.checked ? "1" : "0");
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Offline checks for the pure functions: URL parsing and node normalization."""
+"""Offline checks: URL parsing, node normalization, and the file list."""
+import json
+import os
+import tempfile
+
 import figma
 
 
@@ -74,6 +78,44 @@ def test_parse_tabs():
     assert figma.parse_tabs({}) == []
 
 
+def test_hidden_and_favorites(tmp):
+    figma.FAVORITES_FILE = os.path.join(tmp, "favorites.json")
+    figma.HIDDEN_FILE = os.path.join(tmp, "hidden.json")
+    figma.FIGMA_SETTINGS = os.path.join(tmp, "settings.json")
+    with open(figma.FIGMA_SETTINGS, "w", encoding="utf-8") as f:
+        json.dump({"windows": [{"tabs": [
+            {"path": "/file/AAAAAAAAAAAA", "title": "열린 파일", "lastViewedAt": 200},
+            {"path": "/file/BBBBBBBBBBBB", "title": "지워진 파일", "lastViewedAt": 100},
+        ]}]}, f)
+
+    assert [f["key"] for f in figma.list_files()] == ["AAAAAAAAAAAA", "BBBBBBBBBBBB"]
+
+    figma.edit_hidden({"action": "hide", "key": "BBBBBBBBBBBB"})
+    assert [f["key"] for f in figma.list_files()] == ["AAAAAAAAAAAA"], "hidden drops out"
+    assert figma.read_hidden() == ["BBBBBBBBBBBB"]
+
+    figma.edit_hidden({"action": "show", "key": "BBBBBBBBBBBB"})
+    assert len(figma.list_files()) == 2, "hiding is reversible"
+
+    # A favorite sorts ahead of a more recently viewed tab.
+    figma.edit_favorites({"action": "add", "key": "BBBBBBBBBBBB", "title": "고정"})
+    assert figma.list_files()[0]["key"] == "BBBBBBBBBBBB"
+
+    # A file we could not check must not be hidden by clean.
+    figma.file_meta = lambda key: (False, None) if key == "BBBBBBBBBBBB" else (None, None)
+    report = figma.clean_files()
+    assert report["hidden"] == ["BBBBBBBBBBBB"], report
+    assert report["unverified"] == ["AAAAAAAAAAAA"], report
+    assert [f["key"] for f in figma.list_files()] == ["AAAAAAAAAAAA"]
+
+
+def test_wants_verify():
+    assert figma.wants_verify("verify") is True, "a valueless flag still counts"
+    assert figma.wants_verify("verify=1") is True
+    assert figma.wants_verify("") is False
+    assert figma.wants_verify("other=1") is False
+
+
 def test_same_file():
     assert figma.same_file("Nomm", "Nomm") is True
     assert figma.same_file(" Nomm ", "Nomm") is True, "trim both sides"
@@ -88,5 +130,8 @@ if __name__ == "__main__":
     test_parse_target()
     test_norm_node()
     test_parse_tabs()
+    test_wants_verify()
     test_same_file()
+    with tempfile.TemporaryDirectory() as tmp:
+        test_hidden_and_favorites(tmp)
     print("ok")

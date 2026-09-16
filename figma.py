@@ -9,7 +9,6 @@ import http.server
 import json
 import os
 import re
-import shutil
 import socket
 import socketserver
 import subprocess
@@ -28,14 +27,6 @@ RELAY_PORT = int(os.getenv("FIGMA_RELAY_PORT", "3055"))
 RELAY = f"http://127.0.0.1:{RELAY_PORT}"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RELAY_TOKEN_FILE = os.path.expanduser("~/.figma-bridge/relay-token")
-
-
-def read_relay_token():
-    try:
-        with open(RELAY_TOKEN_FILE, encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return None
 
 
 # --- plumbing ---------------------------------------------------------------
@@ -68,7 +59,9 @@ def parse_target(s):
         return s, None
     m = re.search(r"figma\.com/(?:file|design|board|slides|make)/([0-9A-Za-z]{10,128})", s)
     if not m:
-        sys.exit(f"no file key in URL: {s}")
+        # Raised, not exited: this also runs inside the server, where exiting
+        # would kill the request thread without a response.
+        raise ValueError(f"no file key in URL: {s}")
     query = urllib.parse.parse_qs(urllib.parse.urlparse(s).query)
     node = query.get("node-id", [None])[0]
     return m.group(1), node.replace("-", ":") if node else None
@@ -282,6 +275,7 @@ class _Relay:
         self.last_poll = 0.0
         self.plugin = {}
         self.token = None
+        self.abandoned = set()
 
     def submit(self, code, timeout):
         job = {"id": uuid.uuid4().hex, "code": code}
@@ -289,13 +283,19 @@ class _Relay:
         with self.lock:
             self.jobs.append(job)
             self.events[job["id"]] = done
-        if not done.wait(timeout):
-            with self.lock:
-                self.events.pop(job["id"], None)
-            return {"ok": False, "error": f"no result within {timeout}s"}
+
+        arrived = done.wait(timeout)
         with self.lock:
             self.events.pop(job["id"], None)
-            return self.results.pop(job["id"], {"ok": False, "error": "result lost"})
+            result = self.results.pop(job["id"], None)
+            if result is None:
+                # Drop it from the queue so a plugin that reconnects later does
+                # not run it, and remember to discard a result that still lands.
+                self.jobs = [j for j in self.jobs if j["id"] != job["id"]]
+                self.abandoned.add(job["id"])
+        if result is not None:
+            return result
+        return {"ok": False, "error": "result lost" if arrived else f"no result within {timeout}s"}
 
     def take(self, meta):
         with self.lock:
@@ -305,9 +305,13 @@ class _Relay:
             return self.jobs.pop(0) if self.jobs else None
 
     def finish(self, payload):
+        job_id = payload.get("id")
         with self.lock:
-            self.results[payload.get("id")] = payload
-            done = self.events.get(payload.get("id"))
+            if job_id in self.abandoned:
+                self.abandoned.discard(job_id)  # nobody is waiting any more
+                return
+            self.results[job_id] = payload
+            done = self.events.get(job_id)
         if done:
             done.set()
 
@@ -400,16 +404,23 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
         if not self._authorized():
             return
-        if self.path == "/status":
+        path, _, query = self.path.partition("?")
+        if path == "/status":
             self._send(200, STATE.status())
-        elif self.path == "/files":
-            self._send(200, {"files": list_files()})
+        elif path == "/files":
+            self._send(200, {"files": list_files(wants_verify(query)), "hidden": read_hidden()})
         else:
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
         if not self._authorized():
             return
+        try:
+            self._route_post()
+        except ValueError as e:      # bad URL from the page, not a server fault
+            self._send(400, {"error": str(e)})
+
+    def _route_post(self):
         if self.path == "/poll":
             job = STATE.take(self._read())
             self._send(200, job) if job else self._send(204)
@@ -425,6 +436,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                                           float(payload.get("wait", 6.0))))
         elif self.path == "/favorites":
             self._send(200, {"favorites": edit_favorites(self._read())})
+        elif self.path == "/hidden":
+            self._send(200, {"hidden": edit_hidden(self._read())})
+        elif self.path == "/clean":
+            self._send(200, clean_files())
         else:
             self._send(404, {"error": "not found"})
 
@@ -443,10 +458,18 @@ class _Server6(_Server):
     address_family = socket.AF_INET6
 
 
+def read_relay_token():
+    try:
+        with open(RELAY_TOKEN_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
 def relay_call(path, payload=None, timeout=70):
     secret = read_relay_token()
     if not secret:
-        sys.exit(f"no relay token at {RELAY_TOKEN_FILE} — start the relay: python3 {__file__} relay")
+        sys.exit(f"no relay token at {RELAY_TOKEN_FILE} — start the app: python3 {__file__} serve")
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(RELAY + path, data=data,
                                  method="POST" if data else "GET",
@@ -456,10 +479,10 @@ def relay_call(path, payload=None, timeout=70):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return None if r.status == 204 else json.load(r)
     except urllib.error.URLError as e:
-        sys.exit(f"relay unreachable at {RELAY} — start it: python3 {__file__} relay  ({e})")
+        sys.exit(f"relay unreachable at {RELAY} — start it: python3 {__file__} serve  ({e})")
 
 
-def cmd_relay(args, token=None):
+def cmd_serve(args, token=None):
     # Reuse the stored token so the plugin does not ask again on every restart.
     stored = None if getattr(args, "rotate", False) else read_relay_token()
     STATE.token = stored or uuid.uuid4().hex
@@ -486,21 +509,6 @@ def cmd_relay(args, token=None):
         print("stopped")
 
 
-def rest_file_name(key):
-    """The Plugin API has no file key — `figma.fileKey` does not exist and
-    `figma.root.id` is "0:0" in every file — so the name is the only thing both
-    sides can see. Fetched here over REST for the file the caller asked for."""
-    token = find_token()
-    if not token:
-        return None
-    req = urllib.request.Request(f"{API}/v1/files/{key}/meta", headers={"X-Figma-Token": token})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return (json.load(r).get("file") or {}).get("name")
-    except Exception:
-        return None
-
-
 def same_file(open_name, wanted_name):
     """None means 'cannot tell' — the caller warns instead of blocking."""
     if not open_name or not wanted_name:
@@ -515,9 +523,11 @@ def run_js(code, target=None, timeout=60):
                  "figma-bridge plugin. For files that are not open, use the official MCP use_figma.")
 
     if target:
+        # The plugin cannot report a file key (figma.fileKey does not exist and
+        # figma.root.id is "0:0" everywhere), so the name is all both sides share.
         key, _ = parse_target(target)
         open_name = (status.get("file") or {}).get("fileName")
-        verdict = same_file(open_name, rest_file_name(key))
+        verdict = same_file(open_name, file_meta(key)[1])
         if verdict is False:
             sys.exit(f"플러그인이 붙어 있는 파일은 '{open_name}' 입니다 — 요청한 파일이 아닙니다. "
                      f"Figma에서 대상 파일을 열고 플러그인을 실행하세요.")
@@ -593,6 +603,7 @@ def cmd_pages(args, token=None):
 # --- file list, opening, launch agent -----------------------------------------
 
 FAVORITES_FILE = os.path.expanduser("~/.figma-bridge/favorites.json")
+HIDDEN_FILE = os.path.expanduser("~/.figma-bridge/hidden.json")
 FIGMA_SETTINGS = os.path.expanduser("~/Library/Application Support/Figma/settings.json")
 AGENT_LABEL = "dev.jsyoo.figma-bridge"
 AGENT_PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{AGENT_LABEL}.plist")
@@ -624,12 +635,28 @@ def parse_tabs(settings):
     return list(found.values())
 
 
-def read_favorites():
+def wants_verify(query):
+    """`?verify` carries no value, and parse_qs drops blank values by default —
+    which silently turned every verify request into a plain listing."""
+    return "verify" in urllib.parse.parse_qs(query, keep_blank_values=True)
+
+
+def _read_json(path, fallback):
     try:
-        with open(FAVORITES_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
-        return []
+        return fallback
+
+
+def _write_json(path, value):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(value, f, ensure_ascii=False, indent=2)
+
+
+def read_favorites():
+    return _read_json(FAVORITES_FILE, [])
 
 
 def edit_favorites(payload):
@@ -641,18 +668,47 @@ def edit_favorites(payload):
             favorites.append({"key": key, "title": payload.get("title") or key})
     elif action == "remove":
         favorites = [f for f in favorites if f["key"] != key]
-    os.makedirs(os.path.dirname(FAVORITES_FILE), mode=0o700, exist_ok=True)
-    with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
-        json.dump(favorites, f, ensure_ascii=False, indent=2)
+    _write_json(FAVORITES_FILE, favorites)
     return favorites
 
 
-def list_files():
+def read_hidden():
+    return _read_json(HIDDEN_FILE, [])
+
+
+def edit_hidden(payload):
+    """Hiding is reversible and local: the file itself is never touched."""
+    hidden = set(read_hidden())
+    keys = payload.get("keys") or ([payload["key"]] if payload.get("key") else [])
+    action = payload.get("action")
+    if action == "hide":
+        hidden |= set(keys)
+    elif action == "show":
+        hidden -= set(keys)
+    elif action == "clear":
+        hidden = set()
+    _write_json(HIDDEN_FILE, sorted(hidden))
+    return sorted(hidden)
+
+
+def file_meta(key):
+    """(exists, name). exists is None when we cannot tell — no token, no network,
+    or a 403, which means 'not mine to see' rather than 'gone'."""
+    token = find_token()
+    if not token:
+        return None, None
+    req = urllib.request.Request(f"{API}/v1/files/{key}/meta", headers={"X-Figma-Token": token})
     try:
-        with open(FIGMA_SETTINGS, encoding="utf-8") as f:
-            tabs = parse_tabs(json.load(f))
-    except (OSError, ValueError):
-        tabs = []
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return True, (json.load(r).get("file") or {}).get("name")
+    except urllib.error.HTTPError as e:
+        return (False, None) if e.code == 404 else (None, None)
+    except Exception:
+        return None, None
+
+
+def list_files(verify=False):
+    tabs = parse_tabs(_read_json(FIGMA_SETTINGS, {}))
 
     by_key = {t["key"]: t for t in tabs}
     for fav in read_favorites():
@@ -660,8 +716,31 @@ def list_files():
                                                "source": "favorite"})
         entry["favorite"] = True
 
-    return sorted(by_key.values(),
-                  key=lambda f: (not f.get("favorite"), -f.get("lastViewedAt", 0)))
+    for key in read_hidden():
+        by_key.pop(key, None)
+
+    files = sorted(by_key.values(),
+                   key=lambda f: (not f.get("favorite"), -f.get("lastViewedAt", 0)))
+    if verify:
+        for f in files:
+            exists, _ = file_meta(f["key"])
+            if exists is False:
+                f["missing"] = True
+            elif exists is None:
+                f["unverified"] = True
+    return files
+
+
+def clean_files():
+    """Hide everything Figma says is gone. Files we could not check are left
+    alone — a network hiccup must not make a live file disappear."""
+    files = list_files(verify=True)
+    missing = [f["key"] for f in files if f.get("missing")]
+    if missing:
+        edit_hidden({"action": "hide", "keys": missing})
+    return {"hidden": missing,
+            "unverified": [f["key"] for f in files if f.get("unverified")],
+            "remaining": len(files) - len(missing)}
 
 
 # Figma exposes no way to trigger a plugin from outside, so this drives the
@@ -701,7 +780,7 @@ def accessibility_target():
     return bundle if os.path.exists(bundle) else real
 
 
-def run_plugin(name="figma-bridge", wait=3.0):
+def run_plugin(name="figma-bridge", wait=6.0):
     proc = subprocess.run(["osascript", "-e", QUICK_ACTIONS.format(name=name, wait=wait)],
                           capture_output=True, text=True)
     if proc.returncode != 0:
@@ -733,7 +812,18 @@ def cmd_open(args, token=None):
 
 
 def cmd_files(args, token=None):
-    emit({"_source": "local", "files": list_files()})
+    if args.clean:
+        emit({"_source": "local", **clean_files(), "files": list_files()})
+    else:
+        emit({"_source": "local", "files": list_files(args.verify), "hidden": read_hidden()})
+
+
+def cmd_unhide(args, token=None):
+    if not args.all and not args.target:
+        sys.exit("unhide needs a figma URL or --all")
+    payload = {"action": "clear"} if args.all else {
+        "action": "show", "key": parse_target(args.target)[0]}
+    emit({"_source": "local", "hidden": edit_hidden(payload)})
 
 
 PLIST = """<?xml version="1.0" encoding="UTF-8"?>
@@ -802,13 +892,7 @@ def cmd_setup(args, token=None):
     checks = []
     checks.append(("python", sys.version.split()[0], sys.version_info >= (3, 9)))
 
-    has_token = False
-    try:
-        load_token_quiet = os.getenv(TOKEN_KEY) or (
-            TOKEN_KEY + "=" in open(ENV_PATH, encoding="utf-8").read())
-        has_token = bool(load_token_quiet)
-    except OSError:
-        pass
+    has_token = bool(find_token())
     checks.append((TOKEN_KEY, "set" if has_token else f"missing in {ENV_PATH}", has_token))
 
     app = os.path.isdir("/Applications/Figma.app")
@@ -835,9 +919,8 @@ def cmd_setup(args, token=None):
     if not plugin_up:
         print(f"\n3. Figma desktop > Plugins > Development > Import plugin from manifest")
         print(f"   {os.path.join(HERE, 'plugin', 'manifest.json')}")
-        print(f"4. python3 {__file__} relay    (leave it running)")
+        print(f"4. python3 {__file__} serve    (leave it running)")
         print(f"5. open the target file in Figma, then run the figma-bridge plugin")
-    print(f"\ngit: {shutil.which('git') or 'not found'}")
 
 
 # --- cli --------------------------------------------------------------------
@@ -889,10 +972,17 @@ def build_parser():
         r = sub.add_parser(name, help=help_text)
         r.add_argument("--rotate", action="store_true",
                        help="mint a new token instead of reusing the stored one")
-        r.set_defaults(fn=cmd_relay, needs_token=False)
+        r.set_defaults(fn=cmd_serve, needs_token=False)
 
-    sub.add_parser("files", help="files Figma has open or you pinned") \
-        .set_defaults(fn=cmd_files, needs_token=False)
+    f = sub.add_parser("files", help="files Figma has open or you pinned")
+    f.add_argument("--verify", action="store_true", help="check each file still exists")
+    f.add_argument("--clean", action="store_true", help="hide the ones that are gone")
+    f.set_defaults(fn=cmd_files, needs_token=False)
+
+    u = sub.add_parser("unhide", help="bring hidden files back into the list")
+    u.add_argument("target", nargs="?", help="figma URL or file key")
+    u.add_argument("--all", action="store_true", help="unhide everything")
+    u.set_defaults(fn=cmd_unhide, needs_token=False)
 
     o = sub.add_parser("open", help="open a file in the Figma desktop app")
     o.add_argument("target", help="figma URL or file key")
@@ -927,7 +1017,10 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    args.fn(args, load_token() if getattr(args, "needs_token", True) else None)
+    try:
+        args.fn(args, load_token() if getattr(args, "needs_token", True) else None)
+    except ValueError as e:
+        sys.exit(str(e))
 
 
 if __name__ == "__main__":
