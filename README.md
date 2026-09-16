@@ -43,18 +43,9 @@ launchd가 띄운 프로세스가 키 입력을 보내므로 **승인 팝업이 
 python3 figma.py setup
 ```
 
-무엇이 준비됐고 무엇이 빠졌는지 점검하고, 빠진 것의 절차를 출력한다. 전체 절차는 다음과 같다.
+무엇이 준비됐고 무엇이 빠졌는지 점검하고 빠진 것의 절차를 출력한다. 단계별 안내와 문제 해결은 **[SETUP.md](SETUP.md)** 에 있다.
 
-1. **토큰** — figma.com > Settings > Security > Personal access tokens > Generate new token.
-   스코프는 `current_user:read`, `file_content:read`, `file_metadata:read`, `file_comments:read`, `file_comments:write`.
-   `~/.claude/secrets/.env`에 `FIGMA_PERSONAL_TOKEN=figd_...` 로 저장한다.
-   이 경로는 dotclaude Private 레포라서 `git pull` 하면 토큰도 같이 온다. 그 경우 이 단계는 건너뛴다.
-2. **Figma 데스크톱** — `brew install --cask figma`. 플러그인 경로를 쓸 때만 필요하다.
-3. **플러그인 임포트** — Figma 데스크톱 > Plugins > Development > Import plugin from manifest > 이 레포의 `plugin/manifest.json`.
-4. **릴레이 실행** — `python3 figma.py relay` 를 켜 둔다. 실행할 때마다 **새 토큰**을 출력하고 `~/.figma-bridge/relay-token`(0600)에 저장한다.
-5. **플러그인 실행** — 작업할 파일을 열고 figma-bridge 플러그인을 실행한다. 처음 한 번 릴레이가 출력한 토큰을 플러그인 창에 붙여넣는다. 토큰은 그 머신의 `figma.clientStorage`에 남아 다음부터는 묻지 않는다. 창의 점이 초록색이면 연결된 것이다.
-
-1번까지만 하면 읽기는 전부 된다. 2~5번은 쓰기와 변수 조회를 쓸 때만 필요하다.
+토큰만 있으면 읽기는 전부 된다. Figma 데스크톱과 플러그인은 쓰기·변수 조회에만 필요하다.
 
 ## 서브커맨드
 
