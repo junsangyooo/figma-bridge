@@ -60,11 +60,20 @@ python3 figma.py setup
 
 ```bash
 python3 figma.py exec "https://figma.com/design/KEY/Name" --code '
-  const f = figma.createAutoLayout("VERTICAL", {name: "Card", itemSpacing: 8});
+  const f = figma.createFrame();
+  f.name = "Card";
+  f.layoutMode = "VERTICAL";
+  f.primaryAxisSizingMode = "AUTO";
+  f.counterAxisSizingMode = "AUTO";
+  f.itemSpacing = 8;
   f.x = 400; f.y = 200;
   return {createdNodeIds: [f.id]};
 '
 ```
+
+**`exec`는 순수 Plugin API만 받는다.** 공식 MCP `use_figma`에는 `figma.createAutoLayout()`, `node.query()`, `node.set()`, `node.screenshot()`, `node.placeholder` 같은 편의 API가 얹혀 있지만 이것들은 **실제 플러그인 환경에 없다.** 쓰면 `not a function`이 난다.
+
+페이지도 다르다. `documentAccess`가 `dynamic-page`라서 현재 페이지가 아닌 페이지의 `children`을 읽으려면 먼저 `await page.loadAsync()` 를 호출해야 한다.
 
 ## 파일을 새로 만들 때
 

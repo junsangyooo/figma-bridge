@@ -126,12 +126,14 @@ def norm_node(n, depth=None):
                       if box.get(k) is not None}
 
     if n.get("layoutMode") and n["layoutMode"] != "NONE":
-        out["layout"] = {
+        layout = {
             "mode": n["layoutMode"],
-            "gap": n.get("itemSpacing"),
             "padding": [n.get("paddingTop", 0), n.get("paddingRight", 0),
                         n.get("paddingBottom", 0), n.get("paddingLeft", 0)],
         }
+        if n.get("itemSpacing") is not None:
+            layout["gap"] = n["itemSpacing"]
+        out["layout"] = layout
 
     for key in ("fills", "strokes"):
         paints = [norm_paint(p) for p in (n.get(key) or []) if p.get("visible", True)]
@@ -411,7 +413,9 @@ def relay_call(path, payload=None, timeout=70):
 
 
 def cmd_relay(args, token=None):
-    STATE.token = uuid.uuid4().hex
+    # Reuse the stored token so the plugin does not ask again on every restart.
+    stored = None if getattr(args, "rotate", False) else read_relay_token()
+    STATE.token = stored or uuid.uuid4().hex
     os.makedirs(os.path.dirname(RELAY_TOKEN_FILE), mode=0o700, exist_ok=True)
     with open(os.open(RELAY_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
         f.write(STATE.token)
@@ -488,7 +492,13 @@ return figma.currentPage.selection.map(n => ({
 """
 
 JS_PAGES = """
-return figma.root.children.map(p => ({ id: p.id, name: p.name, children: p.children.length }));
+// documentAccess is dynamic-page, so only the current page's children are loaded.
+const current = figma.currentPage.id;
+return figma.root.children.map(p => {
+  const out = { id: p.id, name: p.name, current: p.id === current };
+  if (p.id === current) out.children = p.children.length;
+  return out;
+});
 """
 
 
@@ -590,8 +600,10 @@ def build_parser():
     # --- plugin route (no REST token needed) ---
     sub.add_parser("setup", help="check this machine and print setup steps") \
         .set_defaults(fn=cmd_setup, needs_token=False)
-    sub.add_parser("relay", help="run the local relay the Figma plugin talks to") \
-        .set_defaults(fn=cmd_relay, needs_token=False)
+    r = sub.add_parser("relay", help="run the local relay the Figma plugin talks to")
+    r.add_argument("--rotate", action="store_true",
+                   help="mint a new token instead of reusing the stored one")
+    r.set_defaults(fn=cmd_relay, needs_token=False)
 
     e = sub.add_parser("exec", help="run Plugin API JS in the open file")
     e.add_argument("target", nargs="?", help="figma URL — guards against the wrong file being open")

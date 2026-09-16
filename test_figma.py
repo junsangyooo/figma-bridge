@@ -46,6 +46,11 @@ def test_norm_node():
     assert label["text"] == "확인"
     assert label["style"] == {"fontFamily": "Inter", "fontSize": 16, "fontWeight": 600}
 
+    # A single-child auto-layout frame reports no itemSpacing at all.
+    no_gap = figma.norm_node({"id": "2:1", "name": "Badge", "type": "FRAME",
+                              "layoutMode": "HORIZONTAL", "paddingTop": 6})
+    assert no_gap["layout"] == {"mode": "HORIZONTAL", "padding": [6, 0, 0, 0]}, no_gap
+
     pruned = figma.norm_node(raw, depth=1)
     assert pruned["children"][0]["childCount"] == 1
     assert "children" not in pruned["children"][0], "pruned level reports count only"
