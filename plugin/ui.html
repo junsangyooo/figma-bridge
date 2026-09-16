@@ -2,18 +2,26 @@
   body { font: 12px -apple-system, system-ui, sans-serif; margin: 0; padding: 12px; color: #1a1a1f; }
   #dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #c8ccd4; margin-right: 6px; }
   #dot.on { background: #2ecba0; }
-  #file { color: #6b707a; margin-top: 6px; word-break: break-all; }
-  #log { color: #6b707a; margin-top: 8px; height: 40px; overflow: hidden; }
+  #file, #log { color: #6b707a; margin-top: 6px; word-break: break-all; }
+  #auth { margin-top: 10px; }
+  input { width: 100%; box-sizing: border-box; padding: 6px; border: 1px solid #c8ccd4; border-radius: 4px; font: inherit; }
+  button { margin-top: 6px; padding: 6px 10px; border: 0; border-radius: 4px; background: #2ecba0; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
 </style>
 
 <div><span id="dot"></span><b id="state">연결 중…</b></div>
 <div id="file"></div>
 <div id="log"></div>
 
+<div id="auth" hidden>
+  <div style="margin-bottom:4px">릴레이 토큰을 붙여넣으세요 (figma.py relay 실행 시 출력)</div>
+  <input id="token" type="password" placeholder="relay token" />
+  <button id="save">저장</button>
+</div>
+
 <script>
   var RELAY = "http://127.0.0.1:3055";
   var meta = { fileKey: null, fileName: null, editorType: null };
-  var pending = {};
+  var token = null;
   var online = false;
 
   function setState(ok, text) {
@@ -24,40 +32,61 @@
   function log(text) {
     document.getElementById("log").textContent = text;
   }
+  function needToken(yes) {
+    document.getElementById("auth").hidden = !yes;
+  }
 
-  // Plugin thread -> here: either the file identity or a finished job.
+  document.getElementById("save").onclick = function () {
+    var value = document.getElementById("token").value.trim();
+    if (!value) return;
+    parent.postMessage({ pluginMessage: { type: "setToken", token: value } }, "*");
+    document.getElementById("token").value = "";
+  };
+
+  // Plugin thread -> here: file identity plus the stored token, or a finished job.
   onmessage = function (event) {
     var msg = event.data.pluginMessage;
     if (!msg) return;
+
     if (msg.type === "hello") {
-      meta = msg;
-      document.getElementById("file").textContent = msg.fileName + " (" + (msg.fileKey || "key 미확인") + ")";
+      token = msg.token;
+      meta = { fileKey: msg.fileKey, fileName: msg.fileName, editorType: msg.editorType };
+      document.getElementById("file").textContent =
+        msg.fileName + " (" + (msg.fileKey || "key 미확인") + ")";
+      needToken(!token);
+      if (!token) setState(false, "토큰 필요");
       return;
     }
+
     if (msg.type === "result") {
-      delete pending[msg.id];
       log(msg.ok ? "완료: " + msg.id.slice(0, 8) : "오류: " + msg.error);
       fetch(RELAY + "/result", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Relay-Token": token },
         body: JSON.stringify(msg),
       }).catch(function () {});
     }
   };
 
   function poll() {
+    if (!token) return;
     fetch(RELAY + "/poll", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Relay-Token": token },
       body: JSON.stringify(meta),
     })
       .then(function (r) {
+        if (r.status === 403) {
+          needToken(true);
+          setState(false, "토큰 거부됨");
+          return null;
+        }
+        needToken(false);
         if (!online) setState(true, "연결됨");
         return r.status === 204 ? null : r.json();
       })
       .then(function (job) {
         if (!job) return;
-        pending[job.id] = true;
         log("실행 중: " + job.id.slice(0, 8));
         parent.postMessage({ pluginMessage: { type: "job", id: job.id, code: job.code } }, "*");
       })
@@ -67,5 +96,4 @@
   }
 
   setInterval(poll, 1000);
-  poll();
 </script>

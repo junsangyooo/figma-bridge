@@ -25,6 +25,15 @@ TOKEN_KEY = "FIGMA_PERSONAL_TOKEN"
 RELAY_PORT = int(os.getenv("FIGMA_RELAY_PORT", "3055"))
 RELAY = f"http://127.0.0.1:{RELAY_PORT}"
 HERE = os.path.dirname(os.path.abspath(__file__))
+RELAY_TOKEN_FILE = os.path.expanduser("~/.figma-bridge/relay-token")
+
+
+def read_relay_token():
+    try:
+        with open(RELAY_TOKEN_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
 
 
 # --- plumbing ---------------------------------------------------------------
@@ -261,6 +270,7 @@ class _Relay:
         self.events = {}
         self.last_poll = 0.0
         self.plugin = {}
+        self.token = None
 
     def submit(self, code, timeout):
         job = {"id": uuid.uuid4().hex, "code": code}
@@ -313,9 +323,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _send(self, code, obj=None):
         body = b"" if obj is None else json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
-        # The plugin iframe has a null origin, so it needs a wildcard.
+        # The plugin iframe has a null origin, so it needs a wildcard. Access is
+        # gated by X-Relay-Token, not by this header — see _authorized().
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Relay-Token")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -327,13 +338,34 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def _authorized(self):
+        """This endpoint executes code, so a page the user visits must not reach it.
+
+        CORS alone does not help: it gates reading the response, not delivering the
+        request, and a sandboxed iframe can forge `Origin: null`. The shared secret
+        forces a preflight the attacker cannot satisfy; the Host check blocks DNS
+        rebinding from a name that resolves to 127.0.0.1.
+        """
+        host = (self.headers.get("Host") or "").strip()
+        if host not in (f"127.0.0.1:{RELAY_PORT}", f"localhost:{RELAY_PORT}"):
+            self._send(403, {"error": f"unexpected Host: {host}"})
+            return False
+        if not STATE.token or self.headers.get("X-Relay-Token") != STATE.token:
+            self._send(403, {"error": "missing or wrong X-Relay-Token"})
+            return False
+        return True
+
     def do_OPTIONS(self):
         self._send(204)
 
     def do_GET(self):
+        if not self._authorized():
+            return
         self._send(200, STATE.status()) if self.path == "/status" else self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._authorized():
+            return
         if self.path == "/poll":
             job = STATE.take(self._read())
             self._send(200, job) if job else self._send(204)
@@ -353,10 +385,14 @@ class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def relay_call(path, payload=None, timeout=70):
+    secret = read_relay_token()
+    if not secret:
+        sys.exit(f"no relay token at {RELAY_TOKEN_FILE} — start the relay: python3 {__file__} relay")
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(RELAY + path, data=data,
                                  method="POST" if data else "GET",
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          "X-Relay-Token": secret})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return None if r.status == 204 else json.load(r)
@@ -365,9 +401,15 @@ def relay_call(path, payload=None, timeout=70):
 
 
 def cmd_relay(args, token=None):
+    STATE.token = uuid.uuid4().hex
+    os.makedirs(os.path.dirname(RELAY_TOKEN_FILE), mode=0o700, exist_ok=True)
+    with open(os.open(RELAY_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        f.write(STATE.token)
+
     server = _Server(("127.0.0.1", RELAY_PORT), _Handler)
     print(f"relay on {RELAY} — import {os.path.join(HERE, 'plugin')} in Figma "
           f"(Plugins > Development) and run figma-bridge. Ctrl-C to stop.")
+    print(f"\nplugin token (paste it into the plugin window once):\n  {STATE.token}\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -461,7 +503,9 @@ def cmd_setup(args, token=None):
                    "(brew install --cask figma)", app))
 
     try:
-        status = json.loads(urllib.request.urlopen(RELAY + "/status", timeout=2).read())
+        secret = read_relay_token() or ""
+        probe = urllib.request.Request(RELAY + "/status", headers={"X-Relay-Token": secret})
+        status = json.loads(urllib.request.urlopen(probe, timeout=2).read())
         relay_up, plugin_up = True, status["pluginConnected"]
     except Exception:
         relay_up, plugin_up = False, False

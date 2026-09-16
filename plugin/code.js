@@ -1,7 +1,9 @@
 // figma-bridge plugin: runs agent-issued Plugin API code and returns the result.
 // The UI iframe does the networking (this thread has no fetch); see ui.html.
 
-figma.showUI(__html__, { width: 260, height: 140, title: "figma-bridge" });
+figma.showUI(__html__, { width: 300, height: 200, title: "figma-bridge" });
+
+const TOKEN_KEY = "relayToken";
 
 function describeError(e) {
   if (e && e.message) return String(e.message);
@@ -24,8 +26,27 @@ async function runJob(job) {
   return await fn(figma);
 }
 
+async function sendHello() {
+  const token = await figma.clientStorage.getAsync(TOKEN_KEY);
+  figma.ui.postMessage({
+    type: "hello",
+    token: token || null,
+    fileKey: figma.fileKey || null,
+    fileName: figma.root.name,
+    editorType: figma.editorType,
+  });
+}
+
 figma.ui.onmessage = async function (msg) {
-  if (!msg || msg.type !== "job") return;
+  if (!msg) return;
+
+  if (msg.type === "setToken") {
+    await figma.clientStorage.setAsync(TOKEN_KEY, msg.token);
+    await sendHello();
+    return;
+  }
+
+  if (msg.type !== "job") return;
 
   let payload;
   try {
@@ -37,10 +58,4 @@ figma.ui.onmessage = async function (msg) {
   figma.ui.postMessage(payload);
 };
 
-// Reported on every poll so the CLI can refuse jobs aimed at a different file.
-figma.ui.postMessage({
-  type: "hello",
-  fileKey: figma.fileKey || null,
-  fileName: figma.root.name,
-  editorType: figma.editorType,
-});
+sendHello();

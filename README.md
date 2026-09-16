@@ -27,8 +27,8 @@ python3 figma.py setup
    이 경로는 dotclaude Private 레포라서 `git pull` 하면 토큰도 같이 온다. 그 경우 이 단계는 건너뛴다.
 2. **Figma 데스크톱** — `brew install --cask figma`. 플러그인 경로를 쓸 때만 필요하다.
 3. **플러그인 임포트** — Figma 데스크톱 > Plugins > Development > Import plugin from manifest > 이 레포의 `plugin/manifest.json`.
-4. **릴레이 실행** — `python3 figma.py relay` 를 켜 둔다.
-5. **플러그인 실행** — 작업할 파일을 열고 figma-bridge 플러그인을 실행한다. 창의 점이 초록색이면 연결된 것이다.
+4. **릴레이 실행** — `python3 figma.py relay` 를 켜 둔다. 실행할 때마다 **새 토큰**을 출력하고 `~/.figma-bridge/relay-token`(0600)에 저장한다.
+5. **플러그인 실행** — 작업할 파일을 열고 figma-bridge 플러그인을 실행한다. 처음 한 번 릴레이가 출력한 토큰을 플러그인 창에 붙여넣는다. 토큰은 그 머신의 `figma.clientStorage`에 남아 다음부터는 묻지 않는다. 창의 점이 초록색이면 연결된 것이다.
 
 1번까지만 하면 읽기는 전부 된다. 2~5번은 쓰기와 변수 조회를 쓸 때만 필요하다.
 
