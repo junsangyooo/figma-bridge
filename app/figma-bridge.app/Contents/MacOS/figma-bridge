@@ -1,0 +1,30 @@
+#!/bin/bash
+# Dock entry: make sure the server is up, then show the UI in a chrome-less window.
+set -u
+
+URL="http://localhost:3055/"
+LABEL="dev.jsyoo.figma-bridge"
+HERE="$(cd "$(dirname "$0")/../../../.." && pwd)"   # repo root
+
+up() { curl -s -m 1 -o /dev/null "$URL"; }
+
+if ! up; then
+  # Prefer the launch agent; fall back to a detached serve if it is not installed.
+  launchctl kickstart -k "gui/$(id -u)/$LABEL" 2>/dev/null ||
+    nohup python3 "$HERE/figma.py" serve >/dev/null 2>&1 &
+  for _ in $(seq 1 40); do
+    up && break
+    sleep 0.25
+  done
+fi
+
+if ! up; then
+  osascript -e 'display alert "figma-bridge" message "서버를 시작하지 못했습니다.\n\n터미널에서 python3 figma.py setup 을 실행해 상태를 확인하세요."'
+  exit 1
+fi
+
+if [ -d "/Applications/Google Chrome.app" ]; then
+  open -na "Google Chrome" --args --app="$URL"
+else
+  open "$URL"
+fi

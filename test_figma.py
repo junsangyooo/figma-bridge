@@ -74,8 +74,19 @@ def test_parse_tabs():
     assert figma.parse_tabs({}) == []
 
 
+def test_same_file():
+    assert figma.same_file("Nomm", "Nomm") is True
+    assert figma.same_file(" Nomm ", "Nomm") is True, "trim both sides"
+    assert figma.same_file("Nomm", "Design System") is False
+    # Unknown on either side must not read as a mismatch: the caller warns instead
+    # of blocking, because the plugin exposes no file key to compare against.
+    assert figma.same_file(None, "Nomm") is None
+    assert figma.same_file("Nomm", None) is None
+
+
 if __name__ == "__main__":
     test_parse_target()
     test_norm_node()
     test_parse_tabs()
+    test_same_file()
     print("ok")

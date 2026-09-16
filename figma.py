@@ -40,7 +40,7 @@ def read_relay_token():
 
 # --- plumbing ---------------------------------------------------------------
 
-def load_token():
+def find_token():
     token = os.getenv(TOKEN_KEY)
     if token:
         return token
@@ -52,7 +52,14 @@ def load_token():
                     return line.split("=", 1)[1].strip().strip('"').strip("'")
     except OSError:
         pass
-    sys.exit(f"{TOKEN_KEY} not found. Add it to {ENV_PATH}")
+    return None
+
+
+def load_token():
+    token = find_token()
+    if not token:
+        sys.exit(f"{TOKEN_KEY} not found. Add it to {ENV_PATH}")
+    return token
 
 
 def parse_target(s):
@@ -414,7 +421,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, STATE.submit(payload.get("code", ""), payload.get("timeout", 60)))
         elif self.path == "/open":
             payload = self._read()
-            self._send(200, open_in_figma(payload.get("key"), payload.get("autorun", False)))
+            self._send(200, open_in_figma(payload.get("key"), payload.get("autorun", False),
+                                          float(payload.get("wait", 6.0))))
         elif self.path == "/favorites":
             self._send(200, {"favorites": edit_favorites(self._read())})
         else:
@@ -478,16 +486,45 @@ def cmd_relay(args, token=None):
         print("stopped")
 
 
+def rest_file_name(key):
+    """The Plugin API has no file key — `figma.fileKey` does not exist and
+    `figma.root.id` is "0:0" in every file — so the name is the only thing both
+    sides can see. Fetched here over REST for the file the caller asked for."""
+    token = find_token()
+    if not token:
+        return None
+    req = urllib.request.Request(f"{API}/v1/files/{key}/meta", headers={"X-Figma-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return (json.load(r).get("file") or {}).get("name")
+    except Exception:
+        return None
+
+
+def same_file(open_name, wanted_name):
+    """None means 'cannot tell' — the caller warns instead of blocking."""
+    if not open_name or not wanted_name:
+        return None
+    return open_name.strip() == wanted_name.strip()
+
+
 def run_js(code, target=None, timeout=60):
     status = relay_call("/status")
     if not status["pluginConnected"]:
         sys.exit("plugin not connected — open the file in the Figma desktop app and run the "
                  "figma-bridge plugin. For files that are not open, use the official MCP use_figma.")
+
     if target:
-        want, _ = parse_target(target)
-        have = (status.get("file") or {}).get("fileKey")
-        if have and want and have != want:
-            sys.exit(f"plugin is attached to file {have}, not {want} — open the right file first")
+        key, _ = parse_target(target)
+        open_name = (status.get("file") or {}).get("fileName")
+        verdict = same_file(open_name, rest_file_name(key))
+        if verdict is False:
+            sys.exit(f"플러그인이 붙어 있는 파일은 '{open_name}' 입니다 — 요청한 파일이 아닙니다. "
+                     f"Figma에서 대상 파일을 열고 플러그인을 실행하세요.")
+        if verdict is None:
+            print(f"경고: 파일 대조를 못 했습니다 (열린 파일: {open_name}). "
+                  f"이름이 맞는지 직접 확인하세요.", file=sys.stderr)
+
     out = relay_call("/job", {"code": code, "timeout": timeout}, timeout=timeout + 10)
     emit({"_source": "plugin", **out})
 
@@ -631,12 +668,26 @@ def list_files():
 # command palette: ⌘/ then the plugin name. Needs Accessibility permission.
 QUICK_ACTIONS = '''
 tell application "Figma" to activate
+-- activate is a request, not a guarantee: if another window (the app window we
+-- just opened, say) keeps focus, the keystrokes land in the wrong app.
+set ready to false
+repeat 40 times
+    tell application "System Events"
+        set frontApp to name of first application process whose frontmost is true
+    end tell
+    if frontApp is "Figma" then
+        set ready to true
+        exit repeat
+    end if
+    delay 0.25
+end repeat
+if not ready then error "Figma did not come to the front"
 delay {wait}
 tell application "System Events"
     keystroke "/" using {{command down}}
-    delay 0.5
+    delay 0.6
     keystroke "{name}"
-    delay 0.9
+    delay 1.0
     key code 36
 end tell
 '''
@@ -654,26 +705,31 @@ def run_plugin(name="figma-bridge", wait=3.0):
     proc = subprocess.run(["osascript", "-e", QUICK_ACTIONS.format(name=name, wait=wait)],
                           capture_output=True, text=True)
     if proc.returncode != 0:
-        return {"ok": False, "error": proc.stderr.strip()[:300],
-                "hint": "시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에 아래 항목을 추가하세요",
-                "add": accessibility_target()}
+        error = proc.stderr.strip()[:300]
+        out = {"ok": False, "error": error}
+        if "1002" in error or "not allowed" in error or "허용되지 않" in error:
+            out["hint"] = "시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에 아래 항목을 추가하세요"
+            out["add"] = accessibility_target()
+        return out
     return {"ok": True, "note": "명령 팔레트로 실행을 시도했습니다 — 플러그인 창을 확인하세요"}
 
 
-def open_in_figma(key, autorun=False):
+def open_in_figma(key, autorun=False, wait=6.0):
     if not key:
         return {"ok": False, "error": "key required"}
     # The figma: scheme routes to the desktop app explicitly, unlike an https URL.
     subprocess.run(["open", f"figma://file/{key}"], check=False)
     result = {"ok": True, "opened": key}
     if autorun:
-        result["plugin"] = run_plugin()
+        # Switching files takes a while; typing into the palette before the file
+        # is ready silently does nothing, so err on the side of waiting.
+        result["plugin"] = run_plugin(wait=wait)
     return result
 
 
 def cmd_open(args, token=None):
     key, _ = parse_target(args.target)
-    emit(open_in_figma(key, args.autorun))
+    emit(open_in_figma(key, args.autorun, args.wait))
 
 
 def cmd_files(args, token=None):
@@ -707,12 +763,30 @@ def cmd_install_agent(args, token=None):
                              script=os.path.abspath(__file__), log=log))
 
     uid = os.getuid()
-    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{AGENT_LABEL}"],
-                   capture_output=True)  # ignore "not loaded"
-    out = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", AGENT_PLIST],
-                         capture_output=True, text=True)
-    emit({"plist": AGENT_PLIST, "log": log, "loaded": out.returncode == 0,
-          "error": out.stderr.strip() or None, "url": RELAY + "/"})
+    target = f"gui/{uid}/{AGENT_LABEL}"
+
+    def launchctl(*argv):
+        return subprocess.run(["launchctl", *argv], capture_output=True, text=True)
+
+    launchctl("bootout", target)  # ignore "not loaded"
+    # bootout is asynchronous: bootstrapping while the old job is still on its way
+    # out fails with "Input/output error" and leaves nothing running at all.
+    for _ in range(50):
+        if launchctl("print", target).returncode != 0:
+            break
+        time.sleep(0.1)
+
+    out = None
+    for _ in range(20):
+        out = launchctl("bootstrap", f"gui/{uid}", AGENT_PLIST)
+        if out.returncode == 0:
+            break
+        time.sleep(0.3)
+
+    loaded = launchctl("print", target).returncode == 0
+    emit({"plist": AGENT_PLIST, "log": log, "loaded": loaded,
+          "error": None if loaded else (out.stderr.strip() if out else "bootstrap failed"),
+          "url": RELAY + "/"})
 
 
 def cmd_uninstall_agent(args, token=None):
@@ -824,6 +898,8 @@ def build_parser():
     o.add_argument("target", help="figma URL or file key")
     o.add_argument("--autorun", action="store_true",
                    help="also try to start the plugin via the command palette")
+    o.add_argument("--wait", type=float, default=6.0,
+                   help="seconds to let the file load before typing (default 6)")
     o.set_defaults(fn=cmd_open, needs_token=False)
 
     sub.add_parser("install-agent", help="start the app at login (launchd)") \

@@ -83,8 +83,19 @@ cat ~/.figma-bridge/relay-token
 ```bash
 python3 figma.py setup                    # 전부 OK 인지
 python3 figma.py files                    # 최근 연 파일 목록
-open http://localhost:3055/               # 앱 화면
 ```
+
+## 7단계 — Dock에 올리기
+
+```bash
+open app/figma-bridge.app
+```
+
+서버가 꺼져 있으면 깨운 뒤 주소창 없는 창으로 UI를 띄운다. Chrome이 없으면 기본 브라우저로 연다.
+
+Dock에 고정하려면 **Finder에서 `app/figma-bridge.app` 을 Dock으로 끌어다 놓는다.** 레포를 다른 경로로 옮기면 링크가 끊기므로 옮긴 뒤 다시 끌어다 놓아야 한다.
+
+브라우저에서 바로 열어도 된다: `http://localhost:3055/`
 
 ---
 
@@ -116,6 +127,7 @@ python3 figma.py open <파일URL> --autorun
 - **플러그인은 열려 있는 파일 하나에만 붙는다.** 다른 파일로 옮기면 그 파일에서 다시 실행해야 한다. 닫힌 파일에 쓰려면 Claude Code 안에서 공식 MCP `use_figma`를 쓴다.
 - **파일 목록은 로컬에서 온다.** REST에는 사용자 파일을 나열하는 엔드포인트가 없다. Figma 데스크톱이 기록한 열린 탭을 읽으므로, 한 번도 연 적 없는 파일은 목록에 없다. URL을 붙여넣어 고정하면 된다.
 - **변수 값은 플러그인으로만 읽힌다.** REST의 변수 API는 Enterprise 전용이다.
+- **`exec`의 파일 대조는 이름 기반이다.** Plugin API에는 파일 키가 없다(`figma.fileKey`는 존재하지 않고 `figma.root.id`는 모든 파일에서 `0:0`). 그래서 URL의 키로 REST에서 이름을 받아 열린 파일 이름과 비교한다. **이름이 같은 다른 파일은 구분하지 못한다.** REST 토큰이 없거나 조회에 실패하면 차단하지 않고 경고만 띄운다.
 - **새 파일 생성은 공식 MCP `create_new_file` 전용이다.** REST에도 Plugin API에도 없다.
 
 ## 문제 해결

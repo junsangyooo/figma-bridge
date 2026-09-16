@@ -16,9 +16,10 @@ Figma를 AI 에이전트가 읽고 쓰기 위한 독립 도구 모음. 기능마
 ```bash
 python3 figma.py serve            # 웹 UI + 릴레이
 python3 figma.py install-agent    # 로그인할 때 자동 실행 (launchd)
+open app/figma-bridge.app         # Dock에 올려두고 클릭 한 번으로 열기
 ```
 
-브라우저에서 `http://localhost:3055/` 를 열면 파일 목록이 뜬다. 카드를 누르면 `figma://file/<key>` 딥링크로 Figma 데스크톱이 그 파일을 연다.
+`http://localhost:3055/` 에 파일 목록이 뜬다. 카드를 누르면 `figma://file/<key>` 딥링크로 Figma 데스크톱이 그 파일을 연다. `app/figma-bridge.app` 은 서버가 꺼져 있으면 깨운 뒤 주소창 없는 창으로 띄운다.
 
 **목록은 어디서 오는가.** REST에는 사용자의 파일을 나열하는 엔드포인트가 없다(드래프트는 API 모델에 아예 없고, team_id조차 프로그램으로 얻을 수 없다). 그래서 Figma 데스크톱이 기록한 열린 탭(`~/Library/Application Support/Figma/settings.json`)을 읽고, 여기에 직접 고정한 파일을 합친다. 이 파일은 비공식 내부 포맷이라 Figma 버전업으로 바뀔 수 있다.
 
