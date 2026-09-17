@@ -28,6 +28,9 @@ RELAY_PORT = int(os.getenv("FIGMA_RELAY_PORT", "3055"))
 RELAY = f"http://127.0.0.1:{RELAY_PORT}"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RELAY_TOKEN_FILE = os.path.expanduser("~/.figma-bridge/relay-token")
+INDEX_DIR = os.path.expanduser("~/.figma-bridge/index")
+
+_SAVE_TO = None  # set once from --save; emit() honours it
 
 
 # --- plumbing ---------------------------------------------------------------
@@ -80,7 +83,9 @@ def api(path, token, params=None, method="GET", body=None):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req) as r:
+        # A whole-file read can be megabytes; without a timeout a stalled
+        # connection hangs the command forever.
+        with urllib.request.urlopen(req, timeout=60) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:300]
@@ -97,8 +102,21 @@ def download(url, path):
     return path
 
 
+def save_result(obj, path):
+    """Write the full result to disk and return the summary that goes to stdout
+    instead. The point is to keep a large tree out of the caller's context, so
+    read it back with a grep or a slice — not whole, which defeats the purpose."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    summary = {"saved": os.path.abspath(path), "bytes": os.path.getsize(path)}
+    if isinstance(obj, dict):
+        summary["keys"] = sorted(obj)
+    return summary
+
+
 def emit(obj):
-    json.dump(obj, sys.stdout, ensure_ascii=False, indent=2)
+    json.dump(save_result(obj, _SAVE_TO) if _SAVE_TO else obj,
+              sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
 
 
@@ -669,6 +687,35 @@ if (node.type === "INSTANCE") {
 }
 if ("children" in node) out.childCount = node.children.length;
 if (node.visible === false) out.visible = false;
+
+// Why is this node the size it is? The answer lives in the parent's auto-layout
+// and this node's own sizing, so a lone node is never enough to judge by.
+for (const key of ["layoutSizingHorizontal", "layoutSizingVertical", "layoutAlign", "layoutGrow"]) {
+  try {
+    const v = node[key];
+    if (v !== undefined && v !== figma.mixed) out[key] = v;
+  } catch (e) { /* not in an auto-layout context */ }
+}
+
+function layoutBits(n) {
+  const b = { id: n.id, name: n.name, type: n.type };
+  if (n.layoutMode && n.layoutMode !== "NONE") {
+    b.layout = { mode: n.layoutMode, gap: n.itemSpacing,
+                 padding: [n.paddingTop, n.paddingRight, n.paddingBottom, n.paddingLeft] };
+  }
+  if ("clipsContent" in n && n.clipsContent) b.clipsContent = true;
+  return b;
+}
+
+const parents = [];
+let up = node.parent;
+while (up && parents.length < 3 && up.type !== "PAGE" && up.type !== "DOCUMENT") {
+  parents.push(layoutBits(up));   // nearest first
+  up = up.parent;
+}
+if (parents.length) out.parents = parents;
+while (up && up.type !== "PAGE" && up.type !== "DOCUMENT") up = up.parent;
+if (up && up.type === "PAGE") out.page = up.name;
 return out;
 """
 
@@ -917,6 +964,178 @@ def list_files(verify=False):
             elif exists is None:
                 f["unverified"] = True
     return files
+
+
+# --- index: the relationships a single-node fetch cannot show -----------------
+
+def _destinations(node):
+    """Prototype targets: the older transitionNodeID and the interactions list."""
+    out = []
+    if node.get("transitionNodeID"):
+        out.append(node["transitionNodeID"])
+    for interaction in node.get("interactions") or []:
+        for action in interaction.get("actions") or []:
+            if action.get("destinationId"):
+                out.append(action["destinationId"])
+    return out
+
+
+def _useful_text(value):
+    """Status-bar clutter ("9:41", "100%") identifies nothing, so it is not worth
+    a slot in the six texts that stand in for an unreliable layer name."""
+    text = (value or "").strip()
+    return len(text) >= 2 and any(ch.isalpha() for ch in text)
+
+
+def build_index(data):
+    """Compress a whole-file response into the relationships that a narrow fetch
+    throws away: which screen owns a node, what a screen actually says, which
+    components it uses, and where it leads."""
+    doc = data.get("document") or {}
+
+    # A component's own name is often just the variant ("Size=32"); the set it
+    # belongs to carries the meaning.
+    sets = {sid: (meta or {}).get("name")
+            for sid, meta in (data.get("componentSets") or {}).items()}
+    components = {}
+    for cid, meta in (data.get("components") or {}).items():
+        name = (meta or {}).get("name")
+        set_name = sets.get((meta or {}).get("componentSetId"))
+        components[cid] = f"{set_name}/{name}" if set_name and name else name
+
+    screens, parent, label = {}, {}, {}
+
+    def walk(node, parent_id, screen):
+        nid = node.get("id")
+        parent[nid] = parent_id
+        label[nid] = f"{node.get('name')} ({node.get('type')})"
+        if screen is not None:
+            # Layer names are often meaningless ("Frame 427"); the words on the
+            # screen are what actually identify it.
+            if len(screen["texts"]) < 6 and _useful_text(node.get("characters")):
+                screen["texts"].append(node["characters"].strip()[:40])
+            cid = node.get("componentId")
+            if cid and cid not in screen["components"]:
+                screen["components"].append(cid)
+            screen["to"].extend(_destinations(node))
+        for kid in node.get("children") or []:
+            walk(kid, nid, screen)
+
+    for page in doc.get("children") or []:
+        parent[page["id"]] = doc.get("id")
+        label[page["id"]] = f"{page.get('name')} (PAGE)"
+        for frame in page.get("children") or []:
+            box = frame.get("absoluteBoundingBox") or {}
+            screens[frame["id"]] = {
+                "page": page.get("name"), "name": frame.get("name"),
+                "box": {k: round(v) for k, v in box.items() if isinstance(v, (int, float))},
+                "texts": [], "components": [], "to": [],
+            }
+            walk(frame, page["id"], screens[frame["id"]])
+
+    def screen_of(node_id):
+        seen = 0
+        while node_id and seen < 200:      # guard against a cycle in bad data
+            if node_id in screens:
+                return node_id
+            node_id = parent.get(node_id)
+            seen += 1
+        return None
+
+    # A prototype points at some node; what matters is the screen containing it.
+    for sid, screen in screens.items():
+        targets = {screen_of(t) for t in screen["to"]}
+        screen["to"] = sorted(t for t in targets if t and t != sid)
+
+        # Not every top-level node is a screen — files keep reference images,
+        # notes and spare frames beside the artboards. Rather than guess with a
+        # filter that would drop real screens, record why each one might be one.
+        screen["signals"] = [name for name, present in (
+            ("text", bool(screen["texts"])),
+            ("flow", bool(screen["to"])),
+            ("components", bool(screen["components"])),
+        ) if present]
+
+    return {"screens": screens, "components": components,
+            "parent": parent, "label": label}
+
+
+def index_path(key):
+    return os.path.join(INDEX_DIR, f"{key}.json")
+
+
+def cmd_index(args, token):
+    key, _ = parse_target(args.target)
+    data = api(f"/v1/files/{key}", token)     # one tier 1 call, compressed locally
+    index = build_index(data)
+    index.update({"fileKey": key, "name": data.get("name"), "version": data.get("version"),
+                  "indexedAt": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    os.makedirs(INDEX_DIR, mode=0o700, exist_ok=True)
+    _write_json(index_path(key), index)
+    tally = {}
+    for screen in index["screens"].values():
+        for signal in screen["signals"] or ["bare"]:
+            tally[signal] = tally.get(signal, 0) + 1
+    emit({"_source": "rest", "saved": index_path(key), "file": index["name"],
+          "screens": len(index["screens"]), "withSignal": tally,
+          "components": len(index["components"]), "nodes": len(index["parent"]),
+          "bytes": os.path.getsize(index_path(key))})
+
+
+def resolve_context(index, node_id):
+    """Everything a narrow fetch of this node leaves out."""
+    parent, label, screens = index["parent"], index["label"], index["screens"]
+
+    chain, cur, seen = [], parent.get(node_id), 0
+    while cur and seen < 50:
+        chain.append({"id": cur, "label": label.get(cur)})
+        if cur in screens:
+            break
+        cur = parent.get(cur)
+        seen += 1
+
+    out = {"node": {"id": node_id, "label": label.get(node_id)}}
+    if chain:
+        out["parents"] = chain
+    if node_id not in label:
+        out["warning"] = "이 노드는 인덱스에 없습니다 — 인덱스가 낡았거나 다른 파일입니다"
+
+    screen_id = node_id if node_id in screens else next(
+        (c["id"] for c in chain if c["id"] in screens), None)
+    if screen_id:
+        screen = screens[screen_id]
+        # Nested under "screen" because it describes the screen, not the node —
+        # flat keys read as if the node itself used every one of these.
+        out["screen"] = {"id": screen_id, "name": screen["name"],
+                         "page": screen["page"], "texts": screen["texts"],
+                         "signals": screen.get("signals", [])}
+        if screen["components"]:
+            out["screen"]["usesComponents"] = [{"id": c, "name": index["components"].get(c)}
+                                               for c in screen["components"]]
+        if screen["to"]:
+            out["screen"]["linkedScreens"] = [{"id": t, "name": screens[t]["name"]}
+                                              for t in screen["to"] if t in screens]
+    return out
+
+
+def cmd_context(args, token):
+    key, node = parse_target(args.target)
+    node = args.node or node
+    if not node:
+        sys.exit("context needs --node or a URL containing node-id")
+
+    index = _read_json(index_path(key), None)
+    if index is None:
+        sys.exit(f'no index for {key} — build one: python3 {__file__} index "{args.target}"')
+
+    out = resolve_context(index, node)
+    out["indexedAt"] = index.get("indexedAt")
+    live = (api(f"/v1/files/{key}/meta", token).get("file") or {})   # tier 3, cheap
+    if live.get("version") != index.get("version"):
+        out["stale"] = True
+        print("경고: 파일이 인덱스보다 최신입니다 — 노드 ID가 어긋날 수 있습니다. "
+              f'다시 만들려면: python3 {__file__} index "{args.target}"', file=sys.stderr)
+    emit({"_source": "index", **out})
 
 
 def clean_files():
@@ -1173,6 +1392,15 @@ def build_parser():
     m.add_argument("target")
     m.set_defaults(fn=cmd_meta)
 
+    ix = sub.add_parser("index", help="map a whole file once: screens, components, flow")
+    ix.add_argument("target", help="figma URL or file key")
+    ix.set_defaults(fn=cmd_index)
+
+    cx = sub.add_parser("context", help="what a narrow fetch of a node leaves out")
+    cx.add_argument("target", help="figma URL or file key")
+    cx.add_argument("--node", help="node id (or use a URL with node-id)")
+    cx.set_defaults(fn=cmd_context)
+
     # --- plugin route (no REST token needed) ---
     sub.add_parser("setup", help="check this machine and print setup steps") \
         .set_defaults(fn=cmd_setup, needs_token=False)
@@ -1251,11 +1479,17 @@ def build_parser():
     tx.add_argument("--replace", nargs=2, metavar=("FROM", "TO"),
                     help="replace FROM with TO in every text node")
     tx.set_defaults(fn=cmd_text, needs_token=False)
+
+    for parser in sub.choices.values():
+        parser.add_argument("--save", metavar="FILE",
+                            help="write the JSON result to a file, print a summary")
     return p
 
 
 def main(argv=None):
+    global _SAVE_TO
     args = build_parser().parse_args(argv)
+    _SAVE_TO = args.save
     try:
         args.fn(args, load_token() if getattr(args, "needs_token", True) else None)
     except ValueError as e:

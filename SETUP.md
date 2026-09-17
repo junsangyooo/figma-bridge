@@ -131,6 +131,9 @@ python3 figma.py open <파일URL> --autorun
 - **변수 값은 플러그인으로만 읽힌다.** REST의 변수 API는 Enterprise 전용이다.
 - **`exec`의 파일 대조는 이름 기반이다.** Plugin API에는 파일 키가 없다(`figma.fileKey`는 존재하지 않고 `figma.root.id`는 모든 파일에서 `0:0`). 그래서 URL의 키로 REST에서 이름을 받아 열린 파일 이름과 비교한다. **이름이 같은 다른 파일은 구분하지 못한다.** REST 토큰이 없거나 조회에 실패하면 차단하지 않고 경고만 띄운다.
 - **새 파일 생성은 공식 MCP `create_new_file` 전용이다.** REST에도 Plugin API에도 없다.
+- **`index`는 화면 텍스트를 로컬에 평문으로 남긴다.** 캐시는 `~/.figma-bridge/index/<fileKey>.json`(권한 0700)이고, 화면 식별용으로 각 화면의 앞부분 텍스트 몇 개를 담는다. 민감한 문구가 든 파일이면 이 점을 감안한다.
+- **인덱스는 자동으로 갱신되지 않는다.** `context`가 파일 version을 대조해 낡았으면 경고만 하고 그대로 답한다. 노드 ID가 어긋날 수 있으므로 경고를 보면 `index`를 다시 실행한다.
+- **`index`는 파일 전체를 한 번에 받는다.** Tier 1을 1회 쓰므로, `tree`·`render`를 연달아 쓰는 중이라면 분당 10회 한도에서 경합한다.
 
 ## 문제 해결
 

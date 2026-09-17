@@ -124,6 +124,82 @@ def test_save_export(tmp):
         assert f.read() == "<svg/>"
 
 
+def test_save_result(tmp):
+    path = os.path.join(tmp, "out.json")
+    summary = figma.save_result({"b": "x", "a": [1, 2, 3]}, path)
+    assert summary["saved"] == os.path.abspath(path)
+    assert summary["keys"] == ["a", "b"], "keys tell the caller what is in the file"
+    assert summary["bytes"] > 0
+    with open(path, encoding="utf-8") as f:
+        assert json.load(f) == {"b": "x", "a": [1, 2, 3]}
+
+
+INDEX_SAMPLE = {
+    "name": "Demo", "version": "7",
+    "components": {"9:9": {"name": "Size=32", "componentSetId": "9:0"},
+                   "8:8": {"name": "Card"}},           # no set: name stands alone
+    "componentSets": {"9:0": {"name": "Icon"}},
+    "document": {"id": "0:0", "children": [
+        {"id": "0:1", "name": "Page 1", "children": [
+            {"id": "1:1", "name": "Frame 427",     # a meaningless layer name
+             "absoluteBoundingBox": {"x": 0, "y": 0, "width": 390, "height": 844},
+             "children": [
+                 {"id": "1:5", "name": "Clock", "characters": "9:41"},   # status bar
+                 {"id": "1:2", "name": "Title", "characters": "맛집 찾기"},
+                 {"id": "1:3", "name": "Btn", "componentId": "9:9",
+                  "children": [{"id": "1:4", "name": "Label", "characters": "계속",
+                                "interactions": [{"actions": [{"destinationId": "2:2"}]}]}]},
+             ]},
+            {"id": "2:1", "name": "Detail",
+             "children": [{"id": "2:2", "name": "Inner", "characters": "상세"}]},
+            {"id": "3:1", "name": "참고 이미지"},      # not a screen at all
+        ]},
+    ]},
+}
+
+
+def test_build_index():
+    index = figma.build_index(INDEX_SAMPLE)
+
+    assert set(index["screens"]) == {"1:1", "2:1", "3:1"}, "every top-level node is kept"
+    home = index["screens"]["1:1"]
+    assert home["texts"] == ["맛집 찾기", "계속"], "'9:41' is clutter, not an identifier"
+    assert home["components"] == ["9:9"]
+    assert home["box"] == {"x": 0, "y": 0, "width": 390, "height": 844}
+    # The prototype points at a node inside Detail; what matters is the screen.
+    assert home["to"] == ["2:1"], home["to"]
+    assert index["screens"]["2:1"]["to"] == [], "no outgoing link, and never itself"
+
+    # Nothing is filtered out; the signals say why something looks like a screen.
+    assert home["signals"] == ["text", "flow", "components"], home["signals"]
+    assert index["screens"]["2:1"]["signals"] == ["text"]
+    assert index["screens"]["3:1"]["signals"] == [], "a bare frame declares nothing"
+
+    assert index["parent"]["1:4"] == "1:3", "parent chain reaches nested nodes"
+    assert index["components"] == {"9:9": "Icon/Size=32", "8:8": "Card"}, index["components"]
+
+
+def test_resolve_context():
+    index = figma.build_index(INDEX_SAMPLE)
+
+    ctx = figma.resolve_context(index, "1:4")
+    assert [c["id"] for c in ctx["parents"]] == ["1:3", "1:1"], "nearest first, stops at screen"
+    assert ctx["screen"]["name"] == "Frame 427"
+    assert ctx["screen"]["page"] == "Page 1"
+    # These belong to the screen, not the node, and the shape has to say so.
+    assert ctx["screen"]["usesComponents"] == [{"id": "9:9", "name": "Icon/Size=32"}]
+    assert ctx["screen"]["linkedScreens"] == [{"id": "2:1", "name": "Detail"}]
+    assert "usesComponents" not in ctx, "no flat key that reads as the node's own"
+
+    # A node the index never saw: say so rather than answer confidently.
+    missing = figma.resolve_context(index, "99:99")
+    assert "warning" in missing and "screen" not in missing
+
+    # A screen itself resolves to itself, with no parent chain to climb.
+    top = figma.resolve_context(index, "1:1")
+    assert top["screen"]["id"] == "1:1"
+
+
 def test_wants_verify():
     assert figma.wants_verify("verify") is True, "a valueless flag still counts"
     assert figma.wants_verify("verify=1") is True
@@ -147,7 +223,10 @@ if __name__ == "__main__":
     test_parse_tabs()
     test_wants_verify()
     test_same_file()
+    test_build_index()
+    test_resolve_context()
     with tempfile.TemporaryDirectory() as tmp:
         test_hidden_and_favorites(tmp)
         test_save_export(tmp)
+        test_save_result(tmp)
     print("ok")

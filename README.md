@@ -60,6 +60,15 @@ python3 figma.py setup
 | `assets <url>` | 이미지 fill 원본 다운로드 | 2 |
 | `comments <url>` | 코멘트 읽기·작성 | 2 |
 | `meta <url>` | 파일 메타데이터 | 3 |
+| `index <url>` | 파일 전체를 1회 조회해 관계 지도를 로컬에 압축 저장 | 1 |
+| `context <url> --node <id>` | 그 노드의 부모 체인·소속 화면·쓰는 컴포넌트·연결 화면 | 3 |
+
+모든 명령에 `--save <파일>` 을 붙일 수 있다. 결과 JSON을 파일로 쓰고 화면에는 경로와 크기만 남긴다. **저장만으로는 아무것도 아끼지 못한다** — 저장한 뒤 필요한 부분만 꺼내 봐야 의미가 있다.
+
+```bash
+python3 figma.py tree "<url>" --save /tmp/t.json
+python3 -c "import json;d=json.load(open('/tmp/t.json'));print([c['name'] for c in d['node']['children']])"
+```
 
 **플러그인 경로 (토큰 불필요, Figma에 열려 있는 파일 하나에만 작동, 한도 없음)**
 
