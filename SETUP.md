@@ -2,10 +2,27 @@
 
 처음 쓰는 머신에서 이 문서만 따라가면 된다. macOS 기준.
 
+레포 폴더 자체가 Claude Code 스킬이다(루트의 `SKILL.md`). Claude는 `~/.claude/skills/figma-bridge/figma.py` 경로로 CLI를 부르므로, 레포가 그 경로에서 보이기만 하면 된다. 둘 중 하나를 고른다.
+
+**A. 스킬 폴더에 바로 받기** (가장 간단)
+
+```bash
+mkdir -p ~/.claude/skills
+git clone https://github.com/junsangyooo/figma-bridge.git ~/.claude/skills/figma-bridge
+```
+
+**B. 원하는 곳에 받고 심링크** (레포를 다른 코드와 같이 관리하고 싶을 때)
+
 ```bash
 git clone https://github.com/junsangyooo/figma-bridge.git ~/Documents/GitHub/figma-bridge
-cd ~/Documents/GitHub/figma-bridge
-python3 figma.py setup
+mkdir -p ~/.claude/skills
+ln -s ~/Documents/GitHub/figma-bridge ~/.claude/skills/figma-bridge
+```
+
+`~/Documents/GitHub/figma-bridge` 부분은 어디든 된다. 어느 쪽이든 업데이트는 레포에서 `git pull` 한 번이다.
+
+```bash
+python3 ~/.claude/skills/figma-bridge/figma.py setup
 ```
 
 `setup`은 무엇이 준비됐고 무엇이 빠졌는지 표로 알려준다. 아래 단계를 마친 뒤 다시 실행하면 전부 `OK` 가 된다.
@@ -22,7 +39,7 @@ OK  plugin                connected
 
 ## 1단계 — 토큰 (읽기에 필수)
 
-토큰은 환경변수 `FIGMA_PERSONAL_TOKEN` 또는 `~/.claude/secrets/.env` 에서 읽는다. `python3 figma.py ping` 이 handle과 email을 출력하면 건너뛴다.
+토큰은 환경변수 `FIGMA_PERSONAL_TOKEN` 또는 `~/.claude/secrets/.env` 에서 읽는다. `python3 ~/.claude/skills/figma-bridge/figma.py ping` 이 handle과 email을 출력하면 건너뛴다.
 
 없다면 발급한다.
 
@@ -35,7 +52,7 @@ OK  plugin                connected
 ```bash
 mkdir -p ~/.claude/secrets
 read -s "T?Figma token: " && echo "\nFIGMA_PERSONAL_TOKEN=$T" >> ~/.claude/secrets/.env && unset T
-python3 figma.py ping
+python3 ~/.claude/skills/figma-bridge/figma.py ping
 ```
 
 여기까지 하면 **읽기는 전부 된다.** 트리 조회, 렌더, 코멘트, 에셋 추출. 아래 단계는 쓰기와 변수 조회를 위한 것이다.
@@ -54,13 +71,13 @@ brew install --cask figma
 2. 파일 선택 창에서 **⌘⇧G** 를 누르고 경로를 붙여넣는다
 
 ```
-~/Documents/GitHub/figma-bridge/plugin/manifest.json
+~/.claude/skills/figma-bridge/plugin/manifest.json
 ```
 
 ## 4단계 — 서버를 로그인 시 자동 실행
 
 ```bash
-python3 figma.py install-agent
+python3 ~/.claude/skills/figma-bridge/figma.py install-agent
 ```
 
 launchd에 등록되어 로그인할 때마다 뜬다. 토큰이 출력되는데 다음 단계에서 쓴다. 나중에 다시 볼 일이 있으면:
@@ -69,7 +86,7 @@ launchd에 등록되어 로그인할 때마다 뜬다. 토큰이 출력되는데
 cat ~/.figma-bridge/relay-token
 ```
 
-자동 실행을 원하지 않으면 대신 터미널에서 직접 띄운다: `python3 figma.py serve`
+자동 실행을 원하지 않으면 대신 터미널에서 직접 띄운다: `python3 ~/.claude/skills/figma-bridge/figma.py serve`
 
 ## 5단계 — 플러그인 실행과 토큰 입력
 
@@ -82,14 +99,14 @@ cat ~/.figma-bridge/relay-token
 ## 6단계 — 확인
 
 ```bash
-python3 figma.py setup                    # 전부 OK 인지
-python3 figma.py files                    # 최근 연 파일 목록
+python3 ~/.claude/skills/figma-bridge/figma.py setup                    # 전부 OK 인지
+python3 ~/.claude/skills/figma-bridge/figma.py files                    # 최근 연 파일 목록
 ```
 
 ## 7단계 — Dock에 올리기
 
 ```bash
-open app/figma-bridge.app
+open ~/.claude/skills/figma-bridge/app/figma-bridge.app
 ```
 
 서버가 꺼져 있으면 깨운 뒤 주소창 없는 창으로 UI를 띄운다. Chrome이 없으면 기본 브라우저로 연다.
@@ -98,16 +115,9 @@ Dock에 고정하려면 **Finder에서 `app/figma-bridge.app` 을 Dock으로 끌
 
 브라우저에서 바로 열어도 된다: `http://localhost:3055/`
 
-## 8단계 — Claude Code 스킬 연결
+## 8단계 — Claude Code에서 확인
 
-Claude가 작업마다 REST·플러그인·공식 MCP 중 어느 경로를 쓸지 정하는 규칙이 `skill/SKILL.md` 에 있다. 심링크로 걸어 두면 레포를 `git pull` 할 때 스킬도 같이 갱신된다.
-
-```bash
-mkdir -p ~/.claude/skills
-ln -s ~/Documents/GitHub/figma-bridge/skill ~/.claude/skills/figma-bridge
-```
-
-Claude Code를 새로 열고 "이 Figma 파일 구조 읽어줘 <URL>" 처럼 말하면 스킬이 로드된다.
+Claude Code를 새로 열고 "이 Figma 파일 구조 읽어줘 + URL" 처럼 말하면 스킬이 로드된다. 안 되면 `ls ~/.claude/skills/figma-bridge/SKILL.md` 로 경로를 확인한다.
 
 ---
 
@@ -122,14 +132,14 @@ Figma는 외부에서 플러그인을 실행하는 방법을 제공하지 않는
 1. 등록할 경로를 확인한다
 
 ```bash
-python3 figma.py open <파일URL> --autorun
+python3 ~/.claude/skills/figma-bridge/figma.py open <파일URL> --autorun
 ```
 
 실패 응답의 `add` 필드에 경로가 찍힌다. Homebrew Python이면 `.../Versions/3.14/Resources/Python.app` 형태다.
 
 2. 시스템 설정 → 개인정보 보호 및 보안 → **손쉬운 사용**
 3. `+` → **⌘⇧G** → 위 경로 붙여넣기 → 토글 켜기
-4. 권한은 프로세스 단위로 평가되므로 서비스를 다시 띄운다: `python3 figma.py install-agent`
+4. 권한은 프로세스 단위로 평가되므로 서비스를 다시 띄운다: `python3 ~/.claude/skills/figma-bridge/figma.py install-agent`
 
 **감수할 점:** 이 권한은 figma-bridge만이 아니라 **그 Python으로 실행되는 모든 스크립트**에 키 입력 권한을 준다. 부담되면 등록하지 않는 편이 낫다.
 
@@ -152,7 +162,7 @@ python3 figma.py open <파일URL> --autorun
 | 증상 | 원인과 조치 |
 |---|---|
 | `Manifest error: Invalid value for devAllowedDomains` | manifest에 원시 IP를 쓴 경우. `http://localhost:3055` 형태여야 한다 |
-| 플러그인 창이 "릴레이 없음" | 서버가 안 떠 있다. `python3 figma.py setup` 으로 확인하고 `install-agent` 또는 `serve` 실행 |
+| 플러그인 창이 "릴레이 없음" | 서버가 안 떠 있다. `python3 ~/.claude/skills/figma-bridge/figma.py setup` 으로 확인하고 `install-agent` 또는 `serve` 실행 |
 | 플러그인 창이 "토큰 거부됨" | 서버를 `--rotate` 로 띄워 토큰이 바뀐 경우. `cat ~/.figma-bridge/relay-token` 값을 다시 붙여넣는다 |
 | `exec` 가 `plugin not connected` | 작업할 파일을 열고 플러그인을 실행했는지 확인. 창을 닫았으면 다시 실행 |
 | `exec` 코드가 `not a function` | `use_figma` 전용 API를 쓴 것. `createAutoLayout`·`query`·`set`·`screenshot`·`placeholder`는 실제 Plugin API에 없다 |
@@ -165,7 +175,7 @@ python3 figma.py open <파일URL> --autorun
 ## 제거
 
 ```bash
-python3 figma.py uninstall-agent          # 자동 실행 해제
+python3 ~/.claude/skills/figma-bridge/figma.py uninstall-agent          # 자동 실행 해제
 rm -rf ~/.figma-bridge                    # 릴레이 토큰과 고정 목록
 ```
 

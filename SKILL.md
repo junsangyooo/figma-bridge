@@ -10,7 +10,7 @@ Figma 접근 경로는 세 가지다. 능력이 서로 달라서 **작업에 맞
 명령은 항상 전체 경로로 부른다. zsh는 변수를 단어 분할하지 않아 `FB="python3 ..."` 같은 축약이 깨진다.
 
 ```bash
-python3 ~/Documents/GitHub/figma-bridge/figma.py <서브커맨드>
+python3 ~/.claude/skills/figma-bridge/figma.py <서브커맨드>
 ```
 
 | 경로 | 호출 | 아무 파일이나 | 쓰기 | 한도 |
@@ -26,7 +26,7 @@ python3 ~/Documents/GitHub/figma-bridge/figma.py <서브커맨드>
 전부 `exec`로 쓰던 JS를 줄인 것이다. 없는 기능은 `exec`로 직접 쓴다.
 
 ```bash
-FB=~/Documents/GitHub/figma-bridge/figma.py
+FB=~/.claude/skills/figma-bridge/figma.py
 python3 $FB find --type FRAME --name 카드 --limit 20   # 노드 찾기
 python3 $FB inspect --node 1:23                        # 노드 하나 상세
 python3 $FB components                                 # 컴포넌트·변형 세트
@@ -43,7 +43,7 @@ python3 $FB text --replace "기존" "새것"                # 일괄 교체 (쓰
 2. **쓰기 → 파일이 Figma에 열려 있으면 C(`exec`), 아니면 공식 MCP `use_figma`.** 둘 다 Plugin API라서 코드가 거의 같다.
 3. **변수 값, 실시간 선택, 뷰포트 → C 전용.** B로는 `boundVariables`(어떤 속성이 변수에 묶였는지)까지만 보인다.
 4. **새 파일 생성 → 공식 MCP `create_new_file` 전용.** B에도 C에도 없다.
-5. **C를 쓰기 전 `python3 ~/Documents/GitHub/figma-bridge/figma.py setup`으로 연결을 확인한다.** 추측하지 않는다. 안 붙어 있거나 다른 파일에 붙어 있으면 `python3 ~/Documents/GitHub/figma-bridge/figma.py open <url> --autorun`으로 직접 연결한다(Figma 실행·파일 열기·플러그인 실행·연결 대기). `connected: false`면 `--wait 12`로 한 번 더 시도하고, 그래도 안 되면 사용자에게 요청하거나 공식 MCP로 우회한다.
+5. **C를 쓰기 전 `python3 ~/.claude/skills/figma-bridge/figma.py setup`으로 연결을 확인한다.** 추측하지 않는다. 안 붙어 있거나 다른 파일에 붙어 있으면 `python3 ~/.claude/skills/figma-bridge/figma.py open <url> --autorun`으로 직접 연결한다(Figma 실행·파일 열기·플러그인 실행·연결 대기). `connected: false`면 `--wait 12`로 한 번 더 시도하고, 그래도 안 되면 사용자에게 요청하거나 공식 MCP로 우회한다.
 6. **경로를 바꿨으면 반드시 말한다.** 조용한 폴백은 불완전한 데이터를 완전한 것처럼 쓰게 만든다.
 
 ## exec 쓰는 법
@@ -51,7 +51,7 @@ python3 $FB text --replace "기존" "새것"                # 일괄 교체 (쓰
 `use_figma`와 같은 계약이다. 평범한 JS 본문에 top-level `await`과 `return`을 쓴다.
 
 ```bash
-python3 ~/Documents/GitHub/figma-bridge/figma.py exec "<url>" --code '
+python3 ~/.claude/skills/figma-bridge/figma.py exec "<url>" --code '
   const f = figma.createFrame();
   f.name = "Card";
   f.layoutMode = "VERTICAL";
@@ -77,7 +77,7 @@ python3 ~/Documents/GitHub/figma-bridge/figma.py exec "<url>" --code '
 
 URL을 같이 주면 **다른 파일이 열려 있을 때 실행을 막는다.** 항상 준다.
 
-긴 코드는 파일로 넘긴다: `python3 ~/Documents/GitHub/figma-bridge/figma.py exec "<url>" --file /tmp/job.js`
+긴 코드는 파일로 넘긴다: `python3 ~/.claude/skills/figma-bridge/figma.py exec "<url>" --file /tmp/job.js`
 
 ### Plugin API 주의사항 (use_figma와 동일)
 
@@ -93,7 +93,7 @@ URL을 같이 주면 **다른 파일이 열려 있을 때 실행을 막는다.**
 ## 읽는 순서 (큰 파일)
 
 ```bash
-FB=~/Documents/GitHub/figma-bridge/figma.py
+FB=~/.claude/skills/figma-bridge/figma.py
 python3 $FB index "<파일URL>"                    # 1회. 화면·컴포넌트·흐름 지도를 로컬에 저장
 python3 $FB context "<url>" --node 1:23          # 이 노드의 부모·소속 화면·연결 화면
 python3 $FB tree "<url>" --node 1:23 --prune 3   # 그 다음에야 깊게 본다
