@@ -3,7 +3,7 @@
 처음 쓰는 머신에서 이 문서만 따라가면 된다. macOS 기준.
 
 ```bash
-git clone git@github.com:junsangyooo/figma-bridge.git ~/Documents/GitHub/figma-bridge
+git clone https://github.com/junsangyooo/figma-bridge.git ~/Documents/GitHub/figma-bridge
 cd ~/Documents/GitHub/figma-bridge
 python3 figma.py setup
 ```
@@ -22,7 +22,7 @@ OK  plugin                connected
 
 ## 1단계 — 토큰 (읽기에 필수)
 
-`~/.claude/secrets/.env` 를 dotclaude 레포로 동기화하고 있다면 **이미 있다.** `python3 figma.py ping` 이 handle과 email을 출력하면 건너뛴다.
+토큰은 환경변수 `FIGMA_PERSONAL_TOKEN` 또는 `~/.claude/secrets/.env` 에서 읽는다. `python3 figma.py ping` 이 handle과 email을 출력하면 건너뛴다.
 
 없다면 발급한다.
 
@@ -33,6 +33,7 @@ OK  plugin                connected
 5. 저장한다. 값이 화면에 찍히지 않게 입력받는 방식을 쓴다
 
 ```bash
+mkdir -p ~/.claude/secrets
 read -s "T?Figma token: " && echo "\nFIGMA_PERSONAL_TOKEN=$T" >> ~/.claude/secrets/.env && unset T
 python3 figma.py ping
 ```
@@ -96,6 +97,17 @@ open app/figma-bridge.app
 Dock에 고정하려면 **Finder에서 `app/figma-bridge.app` 을 Dock으로 끌어다 놓는다.** 레포를 다른 경로로 옮기면 링크가 끊기므로 옮긴 뒤 다시 끌어다 놓아야 한다.
 
 브라우저에서 바로 열어도 된다: `http://localhost:3055/`
+
+## 8단계 — Claude Code 스킬 연결
+
+Claude가 작업마다 REST·플러그인·공식 MCP 중 어느 경로를 쓸지 정하는 규칙이 `skill/SKILL.md` 에 있다. 심링크로 걸어 두면 레포를 `git pull` 할 때 스킬도 같이 갱신된다.
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s ~/Documents/GitHub/figma-bridge/skill ~/.claude/skills/figma-bridge
+```
+
+Claude Code를 새로 열고 "이 Figma 파일 구조 읽어줘 <URL>" 처럼 말하면 스킬이 로드된다.
 
 ---
 

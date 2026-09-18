@@ -9,7 +9,7 @@ Figma를 AI 에이전트가 읽고 쓰기 위한 독립 도구 모음. 기능마
 | **B (REST)** | `figma.py` | 읽기와 탐색. Figma 앱을 켜지 않아도 동작 |
 | **C (Plugin)** | 미구현 | 쓰기, 변수, 실시간 선택. Figma 데스크톱 + 로컬 플러그인 필요 |
 
-라우팅 규칙은 `~/.claude/skills/figma-bridge/SKILL.md`에 있다.
+라우팅 규칙은 `skill/SKILL.md`에 있다. `~/.claude/skills/figma-bridge` 로 심링크해서 Claude Code 스킬로 쓴다([SETUP.md](SETUP.md) 8단계).
 
 ## 앱으로 쓰기
 
